@@ -10,6 +10,8 @@
 
 项目级细节统一维护在 `.claude` 目录：
 
+- `.claude/product-prd.md`：产品定位、MVP、风险模型、Agent 场景和视觉方向。
+- `.claude/technical-architecture.md`：跨端技术架构、数据流、核心模块、Agent Runtime、LLM Gateway 和 SVG 架构图。
 - `.claude/README.md`：文档索引和维护规则。
 - `.claude/project-architecture.md`：项目架构、目录职责和扩展方式。
 - `.claude/skill-authoring.md`：项目级 skills 的编写、安装和维护规范。
@@ -20,6 +22,7 @@
 ## Agent 工作原则
 
 - 先阅读本文件和 `.claude/README.md`，再修改项目结构或新增规范。
+- 涉及产品定位、MVP、风险模型、Agent 场景或跨端技术架构时，同步更新 `dev-time` 和 `dev-time-server` 两个仓库中的 `.claude/product-prd.md` 与 `.claude/technical-architecture.md`。
 - 修改项目结构时，同步更新 `.claude/project-architecture.md`。
 - 新增或调整项目级 skill 时，同步更新 `.claude/skill-authoring.md`。
 - 修复问题后更新 `.claude/bug-fix-log.md`，包含现象、原因、修复方式和验证结果。

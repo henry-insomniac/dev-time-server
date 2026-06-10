@@ -4,6 +4,8 @@
 
 ## 文档列表
 
+- `product-prd.md`：Dev Time 产品需求、MVP 边界、风险模型、Agent 场景和视觉方向。
+- `technical-architecture.md`：跨前后端技术架构、数据流、风险引擎、Agent Runtime、LLM Gateway 和 SVG 架构图。
 - `project-architecture.md`：项目定位、目录职责、架构约束和扩展原则。
 - `skill-authoring.md`：项目级 skills 的编写、安装和维护规范。
 - `bug-fix-log.md`：bug 修复记录、复盘模板和已知问题。
@@ -12,6 +14,7 @@
 
 ## 维护规则
 
+- `product-prd.md` 和 `technical-architecture.md` 是产品级基础文档；涉及产品定位、MVP、风险模型、Agent 场景、跨端架构时，必须同步更新 `dev-time` 与 `dev-time-server` 两个仓库中的对应文档。
 - 修改项目结构时，同步更新 `project-architecture.md`。
 - 新增、删除或重命名项目级 skill 时，同步更新 `skill-authoring.md`。
 - 修复 bug 后，同步更新 `bug-fix-log.md`。
@@ -20,4 +23,4 @@
 
 ## 当前状态
 
-本目录由脚手架在 2026-06-10 初始化。请根据项目真实情况补充架构、技术栈和验证命令。
+本目录由脚手架在 2026-06-10 初始化，并在同日补充 Dev Time 产品 PRD 和技术架构基线。请根据项目真实实现继续补充架构、技术栈和验证命令。
