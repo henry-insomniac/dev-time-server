@@ -33,6 +33,7 @@ func NewRouter(dependencies ...Dependencies) http.Handler {
 	router.Post("/api/github/webhook", server.handleGitHubWebhook)
 	router.Get("/api/projects", server.handleProjects)
 	router.Get("/api/projects/{projectID}/risk", server.handleProjectRisk)
+	router.Get("/api/projects/{projectID}/action-suggestions", server.handleProjectActionSuggestions)
 	router.Get("/api/settings/llm-providers", server.handleListLLMProviders)
 	router.Post("/api/settings/llm-providers", server.handleSaveLLMProvider)
 	router.Get(
@@ -490,6 +491,37 @@ func (server server) handleConfirmActionSuggestion(response http.ResponseWriter,
 	}
 
 	writeJSON(response, http.StatusOK, suggestion)
+}
+
+func (server server) handleProjectActionSuggestions(response http.ResponseWriter, request *http.Request) {
+	if server.store == nil {
+		writeJSON(response, http.StatusServiceUnavailable, map[string]string{
+			"error": "repository store is not configured",
+		})
+		return
+	}
+
+	projectID := chi.URLParam(request, "projectID")
+	if projectID == "" {
+		writeJSON(response, http.StatusBadRequest, map[string]string{
+			"error": "project id is required",
+		})
+		return
+	}
+
+	suggestions, err := server.store.ListActionSuggestionsByProject(request.Context(), projectID)
+	if err != nil {
+		writeJSON(response, http.StatusInternalServerError, map[string]string{
+			"error": "list action suggestions failed",
+		})
+		return
+	}
+
+	writeJSON(response, http.StatusOK, struct {
+		ActionSuggestions []db.ActionSuggestion `json:"action_suggestions"`
+	}{
+		ActionSuggestions: suggestions,
+	})
 }
 
 func (server server) handleRefreshAgent(response http.ResponseWriter, request *http.Request) {

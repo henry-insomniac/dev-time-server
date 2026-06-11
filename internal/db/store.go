@@ -670,7 +670,12 @@ func (store *Store) GetEvidenceBundle(
 	}
 	bundle.Signals = signals
 
-	events, err := store.evidenceEvents(ctx, evidenceRefs)
+	repositoryID, err := store.repositoryIDForProject(ctx, bundle.Assessment.ProjectID)
+	if err != nil {
+		return EvidenceBundle{}, err
+	}
+
+	events, err := store.evidenceEvents(ctx, evidenceRefs, repositoryID)
 	if err != nil {
 		return EvidenceBundle{}, err
 	}
@@ -727,20 +732,25 @@ func (store *Store) riskSignalsForProject(
 	return signals, evidenceRefs, nil
 }
 
-func (store *Store) evidenceEvents(ctx context.Context, evidenceRefs []string) ([]EvidenceEvent, error) {
-	if len(evidenceRefs) == 0 {
-		return nil, nil
-	}
-
+func (store *Store) evidenceEvents(
+	ctx context.Context,
+	evidenceRefs []string,
+	repositoryID string,
+) ([]EvidenceEvent, error) {
 	rows, err := store.pool.Query(
 		ctx,
 		`
 		SELECT id, event_type, payload
 		FROM github_events
-		WHERE id = ANY($1)
+		WHERE id = ANY($1::text[])
+		   OR (
+		       repository_id = $2
+		       AND event_type = 'pull_request'
+		   )
 		ORDER BY occurred_at DESC, id DESC
 		`,
 		evidenceRefs,
+		repositoryID,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("query evidence events: %w", err)
@@ -937,6 +947,59 @@ func (store *Store) ConfirmActionSuggestion(
 	}
 
 	return store.ActionSuggestion(ctx, suggestionID)
+}
+
+func (store *Store) ListActionSuggestionsByProject(
+	ctx context.Context,
+	projectID string,
+) ([]ActionSuggestion, error) {
+	rows, err := store.pool.Query(
+		ctx,
+		`
+		SELECT
+			id,
+			project_id,
+			action_type,
+			status,
+			target_ref,
+			draft_body,
+			evidence_refs
+		FROM action_suggestions
+		WHERE project_id = $1
+		ORDER BY created_at DESC, id DESC
+		`,
+		projectID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("list action suggestions: %w", err)
+	}
+	defer rows.Close()
+
+	suggestions := []ActionSuggestion{}
+	for rows.Next() {
+		var suggestion ActionSuggestion
+		var rawEvidenceRefs []byte
+		if err := rows.Scan(
+			&suggestion.ID,
+			&suggestion.ProjectID,
+			&suggestion.ActionType,
+			&suggestion.Status,
+			&suggestion.TargetRef,
+			&suggestion.DraftBody,
+			&rawEvidenceRefs,
+		); err != nil {
+			return nil, fmt.Errorf("scan action suggestion: %w", err)
+		}
+		if err := json.Unmarshal(rawEvidenceRefs, &suggestion.EvidenceRefs); err != nil {
+			return nil, fmt.Errorf("decode action evidence refs: %w", err)
+		}
+		suggestions = append(suggestions, suggestion)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate action suggestions: %w", err)
+	}
+
+	return suggestions, nil
 }
 
 func (store *Store) ActionSuggestion(

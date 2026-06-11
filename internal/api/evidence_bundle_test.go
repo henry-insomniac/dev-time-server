@@ -33,6 +33,24 @@ func TestEvidenceBundleIncludesRiskSignalsAndReferencedEvents(t *testing.T) {
 
 	performWebhookRequest(
 		router,
+		"pull-request-evidence-1",
+		"pull_request",
+		[]byte(`{
+			"repository": {
+				"id": 1001,
+				"name": "dev-time",
+				"full_name": "henry-insomniac/dev-time",
+				"owner": { "login": "henry-insomniac" }
+			},
+			"pull_request": {
+				"number": 18,
+				"title": "Add agent job completion"
+			}
+		}`),
+	)
+
+	performWebhookRequest(
+		router,
 		"check-run-evidence-1",
 		"check_run",
 		[]byte(`{
@@ -103,10 +121,28 @@ func TestEvidenceBundleIncludesRiskSignalsAndReferencedEvents(t *testing.T) {
 	if len(bundle.Signals) != 1 || bundle.Signals[0].EvidenceRefs[0] != "event_check-run-evidence-1" {
 		t.Fatalf("expected signal evidence ref, got %#v", bundle.Signals)
 	}
-	if len(bundle.Events) != 1 || bundle.Events[0].ID != "event_check-run-evidence-1" {
-		t.Fatalf("expected referenced event in bundle, got %#v", bundle.Events)
+	if len(bundle.Events) != 2 {
+		t.Fatalf("expected referenced check run and related pull request in bundle, got %#v", bundle.Events)
+	}
+	if !hasEvidenceEvent(bundle.Events, "event_check-run-evidence-1", "check_run") {
+		t.Fatalf("expected referenced check run event in bundle, got %#v", bundle.Events)
+	}
+	if !hasEvidenceEvent(bundle.Events, "event_pull-request-evidence-1", "pull_request") {
+		t.Fatalf("expected related pull request event in bundle, got %#v", bundle.Events)
 	}
 	if len(bundle.AllowedActions) == 0 {
 		t.Fatal("expected allowed actions in evidence bundle")
 	}
+}
+
+func hasEvidenceEvent(events []struct {
+	ID        string `json:"id"`
+	EventType string `json:"event_type"`
+}, id string, eventType string) bool {
+	for _, event := range events {
+		if event.ID == id && event.EventType == eventType {
+			return true
+		}
+	}
+	return false
 }
