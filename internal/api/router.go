@@ -28,6 +28,7 @@ func NewRouter(dependencies ...Dependencies) http.Handler {
 
 	server := server{store: loaded.Store}
 	router := chi.NewRouter()
+	router.Use(localDevCORS)
 	router.Get("/healthz", handleHealthz)
 	router.Post("/api/github/repositories/import", server.handleImportRepository)
 	router.Post("/api/github/webhook", server.handleGitHubWebhook)
@@ -47,6 +48,24 @@ func NewRouter(dependencies ...Dependencies) http.Handler {
 	router.Post("/internal/agent-jobs/claim", server.handleClaimAgentJob)
 	router.Post("/internal/agent-jobs/{jobID}/complete", server.handleCompleteAgentJob)
 	return router
+}
+
+func localDevCORS(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		origin := request.Header.Get("Origin")
+		if origin == "http://localhost:5173" || origin == "http://127.0.0.1:5173" {
+			response.Header().Set("Access-Control-Allow-Origin", origin)
+			response.Header().Set("Vary", "Origin")
+			response.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+			response.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+		}
+		if request.Method == http.MethodOptions {
+			response.WriteHeader(http.StatusNoContent)
+			return
+		}
+
+		next.ServeHTTP(response, request)
+	})
 }
 
 func handleHealthz(response http.ResponseWriter, _ *http.Request) {

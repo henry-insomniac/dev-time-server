@@ -34,3 +34,21 @@ func TestHealthzReportsServiceIsReady(t *testing.T) {
 		t.Fatalf("expected service dev-time-server, got %q", body.Service)
 	}
 }
+
+func TestRouterAllowsLocalDevCORS(t *testing.T) {
+	request := httptest.NewRequest(http.MethodOptions, "/api/projects", nil)
+	request.Header.Set("Origin", "http://localhost:5173")
+	response := httptest.NewRecorder()
+
+	api.NewRouter().ServeHTTP(response, request)
+
+	if response.Code != http.StatusNoContent {
+		t.Fatalf("expected preflight status 204, got %d", response.Code)
+	}
+	if response.Header().Get("Access-Control-Allow-Origin") != "http://localhost:5173" {
+		t.Fatalf("expected localhost origin to be allowed, got %q", response.Header().Get("Access-Control-Allow-Origin"))
+	}
+	if response.Header().Get("Access-Control-Allow-Methods") == "" {
+		t.Fatal("expected allowed methods header")
+	}
+}
