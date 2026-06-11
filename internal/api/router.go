@@ -35,6 +35,7 @@ func NewRouter(dependencies ...Dependencies) http.Handler {
 	router.Get("/api/projects", server.handleProjects)
 	router.Get("/api/projects/{projectID}/risk", server.handleProjectRisk)
 	router.Get("/api/projects/{projectID}/action-suggestions", server.handleProjectActionSuggestions)
+	router.Get("/api/projects/{projectID}/agent-runs", server.handleProjectAgentRuns)
 	router.Get("/api/settings/llm-providers", server.handleListLLMProviders)
 	router.Post("/api/settings/llm-providers", server.handleSaveLLMProvider)
 	router.Get(
@@ -540,6 +541,37 @@ func (server server) handleProjectActionSuggestions(response http.ResponseWriter
 		ActionSuggestions []db.ActionSuggestion `json:"action_suggestions"`
 	}{
 		ActionSuggestions: suggestions,
+	})
+}
+
+func (server server) handleProjectAgentRuns(response http.ResponseWriter, request *http.Request) {
+	if server.store == nil {
+		writeJSON(response, http.StatusServiceUnavailable, map[string]string{
+			"error": "repository store is not configured",
+		})
+		return
+	}
+
+	projectID := chi.URLParam(request, "projectID")
+	if projectID == "" {
+		writeJSON(response, http.StatusBadRequest, map[string]string{
+			"error": "project id is required",
+		})
+		return
+	}
+
+	runs, err := server.store.ListAgentRunsByProject(request.Context(), projectID)
+	if err != nil {
+		writeJSON(response, http.StatusInternalServerError, map[string]string{
+			"error": "list agent runs failed",
+		})
+		return
+	}
+
+	writeJSON(response, http.StatusOK, struct {
+		AgentRuns []db.AgentRun `json:"agent_runs"`
+	}{
+		AgentRuns: runs,
 	})
 }
 

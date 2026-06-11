@@ -170,6 +170,27 @@ type AgentJob struct {
 	ActionSuggestionIDs []string `json:"action_suggestion_ids,omitempty"`
 }
 
+type AgentRun struct {
+	ID               string      `json:"id"`
+	AgentJobID       string      `json:"agent_job_id"`
+	ProjectID        string      `json:"project_id"`
+	RiskAssessmentID string      `json:"risk_assessment_id"`
+	AgentType        string      `json:"agent_type"`
+	Status           string      `json:"status"`
+	Summary          string      `json:"summary"`
+	Steps            []AgentStep `json:"steps"`
+}
+
+type AgentStep struct {
+	ID           string   `json:"id"`
+	AgentRunID   string   `json:"agent_run_id"`
+	StepType     string   `json:"step_type"`
+	Status       string   `json:"status"`
+	Title        string   `json:"title"`
+	Body         string   `json:"body"`
+	EvidenceRefs []string `json:"evidence_refs"`
+}
+
 type AgentArtifactInput struct {
 	Summary           string
 	EvidenceRefs      []string
@@ -1058,7 +1079,15 @@ func (store *Store) CreateAgentJob(
 	}
 
 	jobID := fmt.Sprintf("job_%d", time.Now().UTC().UnixNano())
-	if _, err := store.pool.Exec(
+	tx, err := store.pool.Begin(ctx)
+	if err != nil {
+		return AgentJob{}, fmt.Errorf("begin create agent job: %w", err)
+	}
+	defer func() {
+		_ = tx.Rollback(ctx)
+	}()
+
+	if _, err := tx.Exec(
 		ctx,
 		`
 		INSERT INTO agent_jobs (
@@ -1080,6 +1109,44 @@ func (store *Store) CreateAgentJob(
 		return AgentJob{}, fmt.Errorf("create agent job: %w", err)
 	}
 
+	runID := "run_" + jobID
+	if _, err := tx.Exec(
+		ctx,
+		`
+		INSERT INTO agent_runs (
+			id,
+			agent_job_id,
+			project_id,
+			risk_assessment_id,
+			agent_type,
+			status
+		)
+		VALUES ($1, $2, $3, $4, $5, 'queued')
+		`,
+		runID,
+		jobID,
+		projectID,
+		riskAssessmentID,
+		agentType,
+	); err != nil {
+		return AgentJob{}, fmt.Errorf("create agent run: %w", err)
+	}
+	if err := insertAgentStep(
+		ctx,
+		tx,
+		runID,
+		"queued",
+		"queued",
+		"Agent 已进入调查队列",
+		"系统已根据风险评估创建 Agent 调查任务。",
+		nil,
+	); err != nil {
+		return AgentJob{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return AgentJob{}, fmt.Errorf("commit create agent job: %w", err)
+	}
+
 	return AgentJob{
 		JobID:            jobID,
 		ProjectID:        projectID,
@@ -1091,8 +1158,16 @@ func (store *Store) CreateAgentJob(
 }
 
 func (store *Store) ClaimNextAgentJob(ctx context.Context) (AgentJob, bool, error) {
+	tx, err := store.pool.Begin(ctx)
+	if err != nil {
+		return AgentJob{}, false, fmt.Errorf("begin claim agent job: %w", err)
+	}
+	defer func() {
+		_ = tx.Rollback(ctx)
+	}()
+
 	var job AgentJob
-	err := store.pool.QueryRow(
+	err = tx.QueryRow(
 		ctx,
 		`
 		UPDATE agent_jobs
@@ -1121,6 +1196,35 @@ func (store *Store) ClaimNextAgentJob(ctx context.Context) (AgentJob, bool, erro
 			return AgentJob{}, false, nil
 		}
 		return AgentJob{}, false, fmt.Errorf("claim agent job: %w", err)
+	}
+
+	runID := "run_" + job.JobID
+	if _, err := tx.Exec(
+		ctx,
+		`
+		UPDATE agent_runs
+		SET status = 'running',
+		    updated_at = now()
+		WHERE agent_job_id = $1
+		`,
+		job.JobID,
+	); err != nil {
+		return AgentJob{}, false, fmt.Errorf("mark agent run running: %w", err)
+	}
+	if err := insertAgentStep(
+		ctx,
+		tx,
+		runID,
+		"running",
+		"running",
+		"Agent 开始调查风险",
+		"Agent 已领取任务，正在读取证据包并形成判断。",
+		nil,
+	); err != nil {
+		return AgentJob{}, false, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return AgentJob{}, false, fmt.Errorf("commit claim agent job: %w", err)
 	}
 
 	return job, true, nil
@@ -1235,11 +1339,185 @@ func (store *Store) CompleteAgentJob(
 		job.ActionSuggestionIDs = append(job.ActionSuggestionIDs, suggestionID)
 	}
 
+	runID := "run_" + job.JobID
+	if _, err := tx.Exec(
+		ctx,
+		`
+		UPDATE agent_runs
+		SET status = 'succeeded',
+		    summary = $2,
+		    updated_at = now()
+		WHERE agent_job_id = $1
+		`,
+		job.JobID,
+		input.Summary,
+	); err != nil {
+		return AgentJob{}, fmt.Errorf("mark agent run succeeded: %w", err)
+	}
+	if err := insertAgentStep(
+		ctx,
+		tx,
+		runID,
+		"completed",
+		"succeeded",
+		"Agent 完成风险判断",
+		input.Summary,
+		input.EvidenceRefs,
+	); err != nil {
+		return AgentJob{}, err
+	}
+
 	if err := tx.Commit(ctx); err != nil {
 		return AgentJob{}, fmt.Errorf("commit complete agent job: %w", err)
 	}
 
 	return job, nil
+}
+
+func insertAgentStep(
+	ctx context.Context,
+	tx pgx.Tx,
+	agentRunID string,
+	stepType string,
+	status string,
+	title string,
+	body string,
+	evidenceRefs []string,
+) error {
+	if evidenceRefs == nil {
+		evidenceRefs = []string{}
+	}
+	rawEvidenceRefs, err := json.Marshal(evidenceRefs)
+	if err != nil {
+		return fmt.Errorf("marshal agent step evidence refs: %w", err)
+	}
+	stepID := fmt.Sprintf("step_%s_%d", agentRunID, time.Now().UTC().UnixNano())
+	if _, err := tx.Exec(
+		ctx,
+		`
+		INSERT INTO agent_steps (
+			id,
+			agent_run_id,
+			step_type,
+			status,
+			title,
+			body,
+			evidence_refs
+		)
+		VALUES ($1, $2, $3, $4, $5, $6, $7)
+		`,
+		stepID,
+		agentRunID,
+		stepType,
+		status,
+		title,
+		body,
+		rawEvidenceRefs,
+	); err != nil {
+		return fmt.Errorf("insert agent step: %w", err)
+	}
+	return nil
+}
+
+func (store *Store) ListAgentRunsByProject(ctx context.Context, projectID string) ([]AgentRun, error) {
+	rows, err := store.pool.Query(
+		ctx,
+		`
+		SELECT
+			id,
+			agent_job_id,
+			project_id,
+			risk_assessment_id,
+			agent_type,
+			status,
+			summary
+		FROM agent_runs
+		WHERE project_id = $1
+		ORDER BY created_at DESC, id DESC
+		`,
+		projectID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("list agent runs: %w", err)
+	}
+	defer rows.Close()
+
+	runs := []AgentRun{}
+	for rows.Next() {
+		var run AgentRun
+		if err := rows.Scan(
+			&run.ID,
+			&run.AgentJobID,
+			&run.ProjectID,
+			&run.RiskAssessmentID,
+			&run.AgentType,
+			&run.Status,
+			&run.Summary,
+		); err != nil {
+			return nil, fmt.Errorf("scan agent run: %w", err)
+		}
+		steps, err := store.listAgentSteps(ctx, run.ID)
+		if err != nil {
+			return nil, err
+		}
+		run.Steps = steps
+		runs = append(runs, run)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate agent runs: %w", err)
+	}
+
+	return runs, nil
+}
+
+func (store *Store) listAgentSteps(ctx context.Context, agentRunID string) ([]AgentStep, error) {
+	rows, err := store.pool.Query(
+		ctx,
+		`
+		SELECT
+			id,
+			agent_run_id,
+			step_type,
+			status,
+			title,
+			body,
+			evidence_refs
+		FROM agent_steps
+		WHERE agent_run_id = $1
+		ORDER BY created_at ASC, id ASC
+		`,
+		agentRunID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("list agent steps: %w", err)
+	}
+	defer rows.Close()
+
+	steps := []AgentStep{}
+	for rows.Next() {
+		var step AgentStep
+		var rawEvidenceRefs []byte
+		if err := rows.Scan(
+			&step.ID,
+			&step.AgentRunID,
+			&step.StepType,
+			&step.Status,
+			&step.Title,
+			&step.Body,
+			&rawEvidenceRefs,
+		); err != nil {
+			return nil, fmt.Errorf("scan agent step: %w", err)
+		}
+		if err := json.Unmarshal(rawEvidenceRefs, &step.EvidenceRefs); err != nil {
+			return nil, fmt.Errorf("decode agent step evidence refs: %w", err)
+		}
+		steps = append(steps, step)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate agent steps: %w", err)
+	}
+
+	return steps, nil
 }
 
 func encryptAPIKey(apiKey string) (string, error) {

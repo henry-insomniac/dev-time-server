@@ -121,7 +121,7 @@ Dev Time 跨端技术架构。定义 GitHub 事实源、事件流、风险引擎
 - `api/`：HTTP router 和 handler。当前包含 `GET /healthz`、`GET /api/projects`、`POST /api/github/repositories/import`、`POST /api/github/webhook`、`GET /api/projects/{projectID}/risk`、`GET /api/projects/{projectID}/action-suggestions`、`GET /api/settings/llm-providers`、`POST /api/settings/llm-providers`、`POST /api/risk-assessments/{assessmentID}/refresh-agent`、`POST /internal/agent-jobs/claim`、`POST /internal/agent-jobs/{jobID}/complete`、`GET /internal/risk-assessments/{assessmentID}/evidence-bundle`、`GET /api/projects/{projectID}/agent-conversation`、`POST /api/agent-conversations/{conversationID}/turns` 和 `POST /api/action-suggestions/{suggestionID}/confirm`。AgentJob completion 可在同一事务保存 AgentArtifact 和关联 ActionSuggestion，并返回 `action_suggestion_ids`。
 - `buildinfo/`：服务标识和构建信息。
 - `config/`：环境变量配置读取。
-- `db/`：PostgreSQL migration runner、基础 store API、Event Store、RiskAssessment 持久化、AgentJob 队列、AgentArtifact 保存、LLM provider key 加密存储、AgentConversation / ActionSuggestion 持久化和容器化集成测试。
+- `db/`：PostgreSQL migration runner、基础 store API、Event Store、RiskAssessment 持久化、AgentJob 队列、AgentRun / AgentStep 调查时间线、AgentArtifact 保存、LLM provider key 加密存储、AgentConversation / ActionSuggestion 持久化和容器化集成测试。
 - `testsupport/`：测试辅助能力。当前提供 PostgreSQL Testcontainers 启动、migration 和 Store 初始化。
 
 后续按 `github`、`risk`、`agentjobs`、`actionsuggestions` 等领域扩展。
@@ -161,3 +161,4 @@ Dev Time 跨端技术架构。定义 GitHub 事实源、事件流、风险引擎
 | 2026-06-11 | 扩展 AgentJob completion payload | Agent 完成任务时可一并保存 ActionSuggestion 草稿并返回建议 ID | `go test ./...` |
 | 2026-06-11 | 增加项目 ActionSuggestion 列表 API | 前端可读取并确认当前项目的行动草稿 | `go test ./...` |
 | 2026-06-11 | 扩展 EvidenceBundle 相关事件 | Agent 可同时获取失败 check_run 和同仓库 pull_request 事件，用于 PR Doctor 草稿生成 | `go test ./...` |
+| 2026-06-11 | 增加 AgentRun / AgentStep 调查时间线 | AgentJob 生命周期可沉淀为可读的 Agent 主导风险调查过程 | `go test ./...` |

@@ -94,4 +94,49 @@ func TestAgentJobCanBeCreatedClaimedAndCompleted(t *testing.T) {
 	if confirmResponse.Code != http.StatusOK {
 		t.Fatalf("expected confirm status 200, got %d: %s", confirmResponse.Code, confirmResponse.Body.String())
 	}
+
+	runsResponse := performJSONRequest(
+		router,
+		http.MethodGet,
+		"/api/projects/"+claimed.ProjectID+"/agent-runs",
+		nil,
+	)
+	if runsResponse.Code != http.StatusOK {
+		t.Fatalf("expected agent runs status 200, got %d: %s", runsResponse.Code, runsResponse.Body.String())
+	}
+
+	var runsBody struct {
+		AgentRuns []struct {
+			AgentType string `json:"agent_type"`
+			Status    string `json:"status"`
+			Summary   string `json:"summary"`
+			Steps     []struct {
+				StepType     string   `json:"step_type"`
+				Title        string   `json:"title"`
+				EvidenceRefs []string `json:"evidence_refs"`
+			} `json:"steps"`
+		} `json:"agent_runs"`
+	}
+	if err := json.NewDecoder(runsResponse.Body).Decode(&runsBody); err != nil {
+		t.Fatalf("decode agent runs response: %v", err)
+	}
+	if len(runsBody.AgentRuns) != 1 {
+		t.Fatalf("expected one agent run, got %#v", runsBody.AgentRuns)
+	}
+	run := runsBody.AgentRuns[0]
+	if run.AgentType != "risk_scout" || run.Status != "succeeded" {
+		t.Fatalf("expected succeeded risk_scout run, got %#v", run)
+	}
+	if run.Summary != "dev-time is high risk because test failed." {
+		t.Fatalf("expected agent run summary to match artifact, got %q", run.Summary)
+	}
+	if len(run.Steps) < 3 {
+		t.Fatalf("expected queued, running, and completed steps, got %#v", run.Steps)
+	}
+	if run.Steps[len(run.Steps)-1].StepType != "completed" {
+		t.Fatalf("expected last step completed, got %#v", run.Steps)
+	}
+	if run.Steps[len(run.Steps)-1].EvidenceRefs[0] != "event_check-run-conversation-1" {
+		t.Fatalf("expected completed step evidence refs, got %#v", run.Steps[len(run.Steps)-1].EvidenceRefs)
+	}
 }
