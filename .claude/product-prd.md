@@ -110,6 +110,107 @@ dev-time-agent    Agent Runtime：上下文构建、工作流编排、LLM 调用
 - 后端加密存储 key，不向前端回传明文。
 - 记录 Agent 调用模型、token 和成本估算。
 
+## 产品交互需求
+
+### 三栏工作台主流程
+
+桌面端首页必须采用定稿 demo 的左中右三栏工作台：
+
+- 左栏为风险队列，按风险分、风险变化时间、是否存在待确认 ActionSuggestion 综合排序。
+- 中栏为当前风险主工作区，展示今日最高风险、三服务链路图、风险详情、EvidenceBundle、AgentArtifact 和 ActionSuggestion。
+- 右栏为常驻 Agent dock，展示 AgentJob 状态、pipeline、上下文对话和输入框。
+- 首次进入默认选中最高风险项目；若不存在高风险项目，选中最近有风险变化的项目；若没有风险，展示稳定态和连接/同步引导。
+- 切换左栏项目时，中栏和右栏上下文必须同步切换到该项目；未发送的输入可清空，历史对话按项目保留为后续能力，MVP 可只保留当前会话。
+- 风险筛选只改变左栏列表；若当前项目被筛选条件排除，自动选中筛选结果中的最高风险项目。
+- 中栏详情默认展示 EvidenceBundle；当 AgentJob 完成并生成 ActionSuggestion 时，可自动切到行动草稿并给出轻量提示。
+- 页面滚动不得影响右侧 Agent dock 的输入框位置；桌面端 Agent 输入框永远置底，消息列表只在 dock 内部滚动。
+
+### Agent 对话
+
+Agent 对话不是通用聊天页，而是当前风险上下文的解释和行动入口。
+
+- Agent 的首条消息必须来自当前项目的 AgentArtifact，说明风险结论、主要证据和可追问方向。
+- 用户可以追问风险原因、证据可靠性、如果不处理的影响、最短处理路径、是否需要调整 scope、能否生成草稿。
+- Agent 回答必须基于当前 EvidenceBundle、AgentArtifact 和 ActionSuggestion，不得凭空引用不存在的 GitHub 对象。
+- 每个关键回答必须能指向 evidence_refs；UI 中应允许用户从回答跳转或高亮对应证据。
+- 用户追问不一定触发完整 AgentJob；默认使用已有 EvidenceBundle 进行轻量回答。
+- 当用户要求“重新分析”“刷新风险”“重新读取 GitHub”时，才创建新的 AgentJob。
+- Agent 主动发言只发生在明确状态变化时：AgentJob 完成、风险升级、同步失败、ActionSuggestion 生成或用户确认后状态改变。
+- LLM provider 未配置、模型调用失败、证据不足或 GitHub 同步过期时，Agent 必须明确说明原因和下一步，而不是输出含糊建议。
+- Agent 对话可以生成新的 ActionSuggestion 草稿，但必须保留用户确认边界。
+
+### AgentJob 与对话关系
+
+- `dev-time-server` 根据 RiskAssessment、用户手动刷新或定时任务创建 AgentJob。
+- AgentJob 完成后生成 AgentArtifact；AgentArtifact 驱动中栏 Agent 输出和右侧对话首条解释。
+- 用户在右侧 Agent dock 追问时，前端应携带当前 project_id、risk_assessment_id、agent_artifact_id 和 conversation context。
+- 追问回答可以产生新的 conversational artifact；只有当用户要求生成行动时，才产生 ActionSuggestion。
+- 如果 EvidenceBundle 已过期，Agent 应提示先同步 GitHub 或重新运行 AgentJob。
+- AgentJob 状态至少包括 queued、running、succeeded、failed、stale。
+
+### ActionSuggestion
+
+ActionSuggestion 是风险闭环的最后一步，必须可查看、可确认、可拒绝。
+
+MVP 支持的草稿类型：
+
+- PR comment：解释阻塞、请求 review、说明修复计划。
+- Issue：创建后续任务、scope 冻结任务、风险跟进任务。
+- Label 建议：blocked、risk、needs-review、scope-drift 等。
+- Milestone 调整建议：延期、拆分、移出低优先级事项。
+- Reviewer 请求：建议指定 reviewer 或重新请求 review。
+- Follow-up reminder：暂缓处理时生成提醒。
+
+每个草稿必须展示：
+
+- 草稿类型。
+- 目标 GitHub 对象。
+- 草稿正文。
+- 生成原因。
+- 证据引用。
+- 执行权限要求。
+- 预计影响。
+
+用户操作：
+
+- 确认：交给 `dev-time-server` 校验权限并执行 GitHub 写入。
+- 编辑：MVP 可先不支持富编辑，但正式产品必须预留编辑入口。
+- 拒绝：记录拒绝原因，用于后续 Agent 质量反馈。
+- 稍后处理：创建待确认状态或提醒，不关闭风险。
+
+确认后必须展示执行状态：pending、executing、succeeded、failed。写入失败时保留草稿、展示失败原因，并允许重试。
+
+### EvidenceBundle 展示
+
+- EvidenceBundle 至少包含 project summary、current risk assessment、risk signals、相关 PR / issue / CI / commit / milestone、activity timeline、historical risk trend、allowed actions。
+- UI 中每条证据必须展示来源类型、标题、摘要、时间和 GitHub 跳转入口。
+- AgentArtifact 的关键结论必须能映射到 evidence_refs。
+- 证据过期、同步失败、权限失效时，风险判断需要标记为 stale 或 degraded。
+- 用户点击证据时，中栏高亮证据详情，右侧 Agent 可以基于该证据继续解释。
+
+### 状态和空状态
+
+必须覆盖以下状态：
+
+- 未连接 GitHub：展示 GitHub App 安装入口和连接后会得到的风险视图。
+- 已连接但未选择 repo：展示 repo 选择和推荐导入说明。
+- repo 同步中：展示同步进度、最近同步时间和当前读取对象。
+- GitHub 权限失效：提示重新授权，不隐藏已有历史风险。
+- 无风险：展示稳定态、最近同步时间和继续观察说明。
+- 有风险但 Agent 尚未运行：允许用户查看规则风险，并提示运行 Agent 获取解释和行动。
+- AgentJob queued / running / succeeded / failed / stale：右侧 dock 必须有明确状态。
+- LLM key 未配置：Agent 对话和草稿能力不可用，设置入口清晰可见。
+- ActionSuggestion 等待确认：左栏和中栏都要有待确认提示。
+- GitHub 写入成功 / 失败：成功后触发风险重算，失败后保留草稿并允许重试。
+
+### 设置和权限
+
+- GitHub App 权限范围必须最小化，MVP 以读取 repo、issue、PR、checks、commit、milestone 为主；写入能力只在用户确认 ActionSuggestion 后调用。
+- 用户可以选择和取消纳入分析的 repository。
+- LLM provider 配置需要支持用途分配：风险解释、Agent 对话、草稿生成、eval。
+- API key 必须加密存储、隐藏展示、支持更新和删除。
+- 所有 GitHub 写入前必须由 `dev-time-server` 校验用户权限、repository 权限和 allowed actions。
+
 ## 非 MVP 范围
 
 - 手动任务管理。
@@ -211,20 +312,27 @@ dev-time-agent    Agent Runtime：上下文构建、工作流编排、LLM 调用
 ## 信息架构
 
 ```text
-Risk Dashboard
-├── 全局风险摘要
-├── 项目风险列表
-├── 今日行动建议
-├── Agent Insight 面板
-└── GitHub 同步状态
-
-Project Detail
-├── 风险评分拆解
-├── 风险趋势
-├── GitHub 证据链
-├── milestone 进度
-├── PR / issue / CI 状态
-└── Agent 建议动作
+Risk Workspace
+├── Left Rail
+│   ├── 风险队列
+│   ├── 风险类别筛选
+│   ├── 项目风险分
+│   └── 待确认 ActionSuggestion 标记
+├── Main Work Area
+│   ├── 今日最高风险
+│   ├── GitHub -> server -> agent -> 用户确认链路图
+│   ├── 当前项目风险详情
+│   ├── EvidenceBundle
+│   ├── AgentArtifact
+│   └── ActionSuggestion 草稿
+├── Agent Dock
+│   ├── AgentJob 状态
+│   ├── workflow pipeline
+│   ├── 当前风险上下文对话
+│   └── 置底输入框
+└── Global Header
+    ├── GitHub 同步
+    └── 手动运行 Agent
 
 Settings
 ├── GitHub App
@@ -238,6 +346,21 @@ Settings
 产品视觉方向为 Intelligent Risk Studio。
 
 它不是传统项目管理后台，也不是单调的深色风险控制台。界面应该像一个轻量、聪明、会主动解释的 AI 项目工作室：既能让用户立刻感知风险，也能通过插图、图标和动效降低压力，让个人开发者和小团队感觉“系统在帮我看住项目”，而不是“又多了一个管理工具”。
+
+### UI / 交互基线
+
+正式产品的核心交互和 UI 必须以 `dev-time/demo/index.html` 当前定稿 demo 为基线，不得在正式实现中退回普通卡片看板、顶部 tab 管理后台或单独聊天页。
+
+定稿基线：
+
+- 桌面端采用左中右三栏工作台：左栏风险队列，中栏当前风险主工作区，右栏常驻 Agent dock。
+- 右侧 Agent dock 是产品核心交互区，不是附属卡片；它承载 AgentJob 状态、pipeline、上下文对话和行动确认。
+- Agent 输入框永远置底；消息列表只在 Agent dock 内部滚动，不跟随中间项目内容滚动。
+- 中栏负责当前风险理解：今日最高风险、三服务链路图、风险详情、证据包、AgentArtifact 和 ActionSuggestion。
+- 左栏负责跨项目扫描：风险队列、风险筛选、项目切换和风险分识别。
+- Agent 对话必须基于当前 EvidenceBundle、AgentArtifact 和 ActionSuggestion，不能做成无上下文的通用聊天。
+- 用户确认前，Agent 只能生成行动草稿；确认后的权限校验和 GitHub 写入仍由 `dev-time-server` 完成。
+- 视觉语言沿用 demo 的暖纸面背景、强黑描边、酸性绿色 Agent dock、品牌蓝主行动、珊瑚风险色、黄色提醒色、自绘三服务流程图和轻量状态动效。
 
 ### 设计气质
 
@@ -351,3 +474,17 @@ MVP 成功不以功能数量衡量，而以风险闭环衡量：
 - 每个风险都有清晰原因和 GitHub 证据。
 - Agent 建议能转化为明确下一步。
 - 用户不需要手动维护第二套项目数据。
+
+### MVP 验收标准
+
+- 用户打开首页 3 秒内看到最高风险项目、风险分和最主要原因。
+- 左栏风险队列默认按风险优先级展示，切换项目后中栏和右侧 Agent dock 同步切换上下文。
+- 桌面端保持左中右三栏；右侧 Agent 输入框永远置底，消息列表内部滚动。
+- 每个高风险项目至少展示 1 条 GitHub 证据，证据可跳转原始 GitHub 对象。
+- 每个 AgentArtifact 必须包含 evidence_refs，前端能展示或高亮对应证据。
+- 用户能在右侧 Agent dock 完成一次追问，并得到基于当前 EvidenceBundle 的回答。
+- 用户能从 Agent 对话或中栏详情生成至少一种 ActionSuggestion 草稿。
+- 确认 ActionSuggestion 前，系统不会写入 GitHub。
+- 确认后由 `dev-time-server` 执行权限校验和 GitHub 写入，并展示 succeeded 或 failed 状态。
+- LLM key 未配置、AgentJob 失败、GitHub 同步过期时，UI 有明确状态和下一步入口。
+- demo 中确定的视觉语言和核心布局在正式实现中保持一致。

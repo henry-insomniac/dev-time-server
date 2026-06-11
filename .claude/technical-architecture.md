@@ -306,6 +306,98 @@ Agent Runtime 由独立的 `dev-time-agent` 服务承载。
 
 Agent 输出必须返回给 `dev-time-server` 保存，并由前端展示。`dev-time-agent` 不直接写 GitHub，不维护 canonical 业务状态。
 
+### Agent Conversation Flow
+
+右侧 Agent dock 的对话是当前风险上下文对话，不是泛用聊天。对话必须绑定 project、risk assessment、EvidenceBundle 和 AgentArtifact。
+
+核心对象：
+
+```text
+AgentConversation
+├── conversation_id
+├── project_id
+├── risk_assessment_id
+├── latest_agent_artifact_id
+├── status
+└── created_at / updated_at
+
+AgentConversationTurn
+├── turn_id
+├── conversation_id
+├── role: user | agent | system
+├── user_message
+├── agent_response
+├── evidence_refs
+├── action_suggestion_ids
+├── model
+├── prompt_version
+├── token_usage
+└── created_at
+```
+
+默认流程：
+
+```text
+User selects project
+-> dev-time loads RiskAssessment + latest AgentArtifact
+-> Agent dock opens / resumes AgentConversation
+-> first agent message is generated from AgentArtifact
+-> user asks contextual question
+-> dev-time-server validates project access
+-> dev-time-server sends conversation turn request to dev-time-agent
+-> dev-time-agent answers using EvidenceBundle + AgentArtifact + conversation summary
+-> dev-time-server stores AgentConversationTurn
+-> dev-time renders answer and linked evidence_refs
+```
+
+触发新 AgentJob 的情况：
+
+- 用户点击“运行 Agent”或“重新分析”。
+- EvidenceBundle 已过期或 GitHub 同步状态 stale。
+- RiskAssessment 发生显著变化。
+- 用户明确要求重新读取 GitHub 事实。
+
+不触发新 AgentJob 的情况：
+
+- 用户追问“为什么”“证据可靠吗”“现在该做什么”。
+- 用户要求把已有结论改写为更清晰说明。
+- 用户询问当前 ActionSuggestion 的影响和权限边界。
+
+对话安全边界：
+
+- 每次回答必须带 evidence_refs；证据不足时必须返回 insufficient_evidence 状态。
+- Agent 不得直接执行 GitHub 写入。
+- Agent 可以生成 ActionSuggestion 草稿；草稿确认和写入仍由 `dev-time-server` 执行。
+- Conversation 日志不得保存 LLM key、GitHub token 或 private repo 的非必要全文。
+
+### ActionSuggestion State Flow
+
+ActionSuggestion 是 `dev-time-agent` 生成、`dev-time-server` 保存和执行的草稿对象。
+
+```text
+drafted
+-> pending_user_confirmation
+-> confirmed
+-> permission_checking
+-> executing
+-> succeeded | failed
+```
+
+用户也可以将草稿改为：
+
+```text
+rejected
+deferred
+edited
+```
+
+执行要求：
+
+- `dev-time-agent` 只返回草稿、目标对象、正文、evidence_refs 和 allowed action type。
+- `dev-time-server` 校验用户权限、repository 权限、GitHub App installation 权限和 allowed_actions。
+- 执行失败时保留草稿和错误原因，允许用户重试或编辑。
+- 执行成功后写入新的 GitHub event，并触发 RiskAssessment 重算。
+
 ### LLM Gateway
 
 职责：
@@ -360,6 +452,18 @@ User opens dashboard
 -> jump to GitHub or confirm action draft
 ```
 
+### Agent 对话流
+
+```text
+User asks in Agent dock
+-> dev-time posts message with project_id + risk_assessment_id + agent_artifact_id
+-> dev-time-server validates access and freshness
+-> dev-time-agent answers with evidence_refs
+-> dev-time-server stores AgentConversationTurn
+-> dev-time renders answer in fixed Agent dock
+-> user can request ActionSuggestion or rerun AgentJob
+```
+
 ### Action Agent 流
 
 ```text
@@ -382,12 +486,19 @@ GET    /api/projects/:id/risk
 GET    /api/projects/:id/timeline
 GET    /api/risk-assessments/:id
 POST   /api/risk-assessments/:id/refresh-agent
+GET    /api/risk-assessments/:id/evidence-bundle
+GET    /api/agent-artifacts/:id
+GET    /api/projects/:id/agent-conversation
+POST   /api/agent-conversations/:id/turns
 GET    /api/github/installations
 POST   /api/github/repositories/import
 POST   /api/github/webhook
 GET    /api/settings/llm-providers
 POST   /api/settings/llm-providers
+PATCH  /api/action-suggestions/:id
 POST   /api/action-suggestions/:id/confirm
+POST   /api/action-suggestions/:id/reject
+POST   /api/action-suggestions/:id/defer
 ```
 
 ## 前后端职责
@@ -398,6 +509,10 @@ POST   /api/action-suggestions/:id/confirm
 
 前端体验系统需要支持：
 
+- 定稿三栏工作台：左风险队列、中风险主工作区、右 Agent dock。
+- Agent dock 固定布局：顶部 AgentJob 状态，中部消息内部滚动，底部输入框永远置底。
+- 上下文对话：发送 project_id、risk_assessment_id、agent_artifact_id 和 conversation_id，渲染 evidence_refs。
+- 状态覆盖：未连接 GitHub、未选择 repo、同步中、权限失效、无风险、Agent queued/running/succeeded/failed/stale、LLM key 未配置、ActionSuggestion pending/executing/succeeded/failed。
 - 状态插图：空状态、同步中、风险稳定、高风险、Agent 分析中、行动完成。
 - 语义图标：GitHub 对象、风险类型、Agent 动作三套图标语义。
 - 动效状态机：同步、风险重算、Agent 分析、证据链展开、ActionSuggestion 确认。

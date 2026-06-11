@@ -46,7 +46,8 @@
     ├── skill-authoring.md
     ├── bug-fix-log.md
     ├── git-collaboration.md
-    └── tech-stack.md
+    ├── tech-stack.md
+    └── coding-standards.md
 ```
 
 ## 目录职责
@@ -66,6 +67,14 @@ Dev Time 产品级 PRD。定义产品定位、MVP 范围、风险模型、Agent 
 ### `.claude/technical-architecture.md`
 
 Dev Time 跨端技术架构。定义 GitHub 事实源、事件流、风险引擎、Agent Runtime、LLM Gateway、通知层和 API 边界。
+
+### `.claude/tech-stack.md`
+
+后端技术栈、工具链、脚本、依赖、安全和验证规范。当前定稿为 Go + PostgreSQL。
+
+### `.claude/coding-standards.md`
+
+后端编码规范、Go / PostgreSQL 数据访问约束、行数约束和评审检查项。
 
 ### `.agents/skills/`
 
