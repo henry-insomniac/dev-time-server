@@ -885,20 +885,10 @@ func (store *Store) GetOrCreateAgentConversation(
 func (store *Store) AddAgentConversationTurn(
 	ctx context.Context,
 	conversationID string,
-	riskAssessmentID string,
 	userMessage string,
+	agentResponse string,
+	evidenceRefs []string,
 ) (AgentConversationTurn, error) {
-	bundle, err := store.GetEvidenceBundle(ctx, riskAssessmentID)
-	if err != nil {
-		return AgentConversationTurn{}, err
-	}
-
-	evidenceRefs := conversationEvidenceRefs(bundle.Signals)
-	agentResponse := "No active risk signals were found."
-	if len(bundle.Signals) > 0 {
-		agentResponse = bundle.Signals[0].Reason
-	}
-
 	rawEvidenceRefs, err := json.Marshal(evidenceRefs)
 	if err != nil {
 		return AgentConversationTurn{}, fmt.Errorf("marshal turn evidence refs: %w", err)

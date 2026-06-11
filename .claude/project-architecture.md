@@ -155,6 +155,7 @@ Dev Time 跨端技术架构。定义 GitHub 事实源、事件流、风险引擎
 | 2026-06-11 | 增加项目风险队列 API | `GET /api/projects` 可按风险分降序返回项目 | `go test ./...` |
 | 2026-06-11 | 增加 LLM Provider 配置 API | 保存 API key 时加密存储，GET/POST 不回传明文 key | `go test ./...` |
 | 2026-06-11 | 增加 Agent internal LLM 配置读取 API | `dev-time-agent` 需要从 server 安全边界读取解密后的 active provider 配置，公开设置 API 仍不回传明文 key | `go test ./...` |
+| 2026-06-11 | Agent Conversation 接入 active LLM Provider | 用户在前端 Agent dock 发送问题后，后端用已配置的 OpenAI/DeepSeek OpenAI-compatible endpoint 生成中文回复，并保留 evidence_refs | `go test ./...` |
 | 2026-06-11 | 增加 EvidenceBundle internal API | Agent 可通过 risk assessment id 获取受控证据包 | `go test ./...` |
 | 2026-06-11 | 增加 Agent Conversation API | 追问可基于 EvidenceBundle 返回 answer 和 evidence_refs | `go test ./...` |
 | 2026-06-11 | 增加 ActionSuggestion 确认 API | 待确认草稿可经 confirm endpoint 进入 succeeded 状态并保留 evidence_refs | `go test ./...` |

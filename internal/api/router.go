@@ -553,11 +553,24 @@ func (server server) handleAgentConversationTurn(response http.ResponseWriter, r
 		return
 	}
 
+	agentResponse, evidenceRefs, err := server.buildAgentConversationReply(
+		request.Context(),
+		input.RiskAssessmentID,
+		input.Message,
+	)
+	if err != nil {
+		writeJSON(response, http.StatusBadGateway, map[string]string{
+			"error": "agent conversation llm response failed",
+		})
+		return
+	}
+
 	turn, err := server.store.AddAgentConversationTurn(
 		request.Context(),
 		conversationID,
-		input.RiskAssessmentID,
 		input.Message,
+		agentResponse,
+		evidenceRefs,
 	)
 	if err != nil {
 		writeJSON(response, http.StatusInternalServerError, map[string]string{
