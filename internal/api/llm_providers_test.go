@@ -108,3 +108,50 @@ func TestLLMProviderSettingsRejectUnsupportedProvider(t *testing.T) {
 		t.Fatalf("expected unsupported provider status 400, got %d: %s", response.Code, response.Body.String())
 	}
 }
+
+func TestInternalLLMProviderConfigReturnsDecryptedEnabledProvider(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	store := testsupport.NewMigratedStore(t, ctx)
+	router := api.NewRouter(api.Dependencies{Store: store})
+
+	saveResponse := performJSONRequest(
+		router,
+		http.MethodPost,
+		"/api/settings/llm-providers",
+		[]byte(`{
+			"provider": "openai",
+			"base_url": "https://api.openai.com/v1",
+			"model": "gpt-4.1",
+			"api_key": "sk-real-agent-key"
+		}`),
+	)
+	if saveResponse.Code != http.StatusCreated {
+		t.Fatalf("expected save status 201, got %d: %s", saveResponse.Code, saveResponse.Body.String())
+	}
+
+	response := performJSONRequest(router, http.MethodGet, "/internal/llm-provider-config", nil)
+	if response.Code != http.StatusOK {
+		t.Fatalf("expected internal config status 200, got %d: %s", response.Code, response.Body.String())
+	}
+
+	var body struct {
+		Provider string `json:"provider"`
+		BaseURL  string `json:"base_url"`
+		Model    string `json:"model"`
+		APIKey   string `json:"api_key"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&body); err != nil {
+		t.Fatalf("decode internal llm config: %v", err)
+	}
+	if body.Provider != "openai" {
+		t.Fatalf("expected openai provider, got %#v", body)
+	}
+	if body.BaseURL != "https://api.openai.com/v1" || body.Model != "gpt-4.1" {
+		t.Fatalf("expected saved base URL and model, got %#v", body)
+	}
+	if body.APIKey != "sk-real-agent-key" {
+		t.Fatalf("expected decrypted API key for internal agent use, got %#v", body)
+	}
+}

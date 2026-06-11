@@ -118,7 +118,7 @@ Dev Time 跨端技术架构。定义 GitHub 事实源、事件流、风险引擎
 
 后端内部包目录。
 
-- `api/`：HTTP router 和 handler。当前包含 `GET /healthz`、`GET /api/projects`、`POST /api/github/repositories/import`、`POST /api/github/webhook`、`GET /api/projects/{projectID}/risk`、`GET /api/projects/{projectID}/action-suggestions`、`GET /api/settings/llm-providers`、`POST /api/settings/llm-providers`、`POST /api/risk-assessments/{assessmentID}/refresh-agent`、`POST /internal/agent-jobs/claim`、`POST /internal/agent-jobs/{jobID}/complete`、`GET /internal/risk-assessments/{assessmentID}/evidence-bundle`、`GET /api/projects/{projectID}/agent-conversation`、`POST /api/agent-conversations/{conversationID}/turns` 和 `POST /api/action-suggestions/{suggestionID}/confirm`。AgentJob completion 可在同一事务保存 AgentArtifact 和关联 ActionSuggestion，并返回 `action_suggestion_ids`。
+- `api/`：HTTP router 和 handler。当前包含 `GET /healthz`、`GET /api/projects`、`POST /api/github/repositories/import`、`POST /api/github/webhook`、`GET /api/projects/{projectID}/risk`、`GET /api/projects/{projectID}/action-suggestions`、`GET /api/settings/llm-providers`、`POST /api/settings/llm-providers`、`POST /api/risk-assessments/{assessmentID}/refresh-agent`、`GET /internal/llm-provider-config`、`POST /internal/agent-jobs/claim`、`POST /internal/agent-jobs/{jobID}/complete`、`GET /internal/risk-assessments/{assessmentID}/evidence-bundle`、`GET /api/projects/{projectID}/agent-conversation`、`POST /api/agent-conversations/{conversationID}/turns` 和 `POST /api/action-suggestions/{suggestionID}/confirm`。AgentJob completion 可在同一事务保存 AgentArtifact 和关联 ActionSuggestion，并返回 `action_suggestion_ids`。
 - `buildinfo/`：服务标识和构建信息。
 - `config/`：环境变量配置读取。
 - `db/`：PostgreSQL migration runner、基础 store API、Event Store、RiskAssessment 持久化、AgentJob 队列、AgentRun / AgentStep 调查时间线、AgentArtifact 保存、LLM provider key 加密存储、AgentConversation / ActionSuggestion 持久化和容器化集成测试。
@@ -154,6 +154,7 @@ Dev Time 跨端技术架构。定义 GitHub 事实源、事件流、风险引擎
 | 2026-06-11 | 增加 Risk Engine v1 首条规则 | check_run failure 可生成 blocked RiskSignal 和 high RiskAssessment | `go test ./...` |
 | 2026-06-11 | 增加项目风险队列 API | `GET /api/projects` 可按风险分降序返回项目 | `go test ./...` |
 | 2026-06-11 | 增加 LLM Provider 配置 API | 保存 API key 时加密存储，GET/POST 不回传明文 key | `go test ./...` |
+| 2026-06-11 | 增加 Agent internal LLM 配置读取 API | `dev-time-agent` 需要从 server 安全边界读取解密后的 active provider 配置，公开设置 API 仍不回传明文 key | `go test ./...` |
 | 2026-06-11 | 增加 EvidenceBundle internal API | Agent 可通过 risk assessment id 获取受控证据包 | `go test ./...` |
 | 2026-06-11 | 增加 Agent Conversation API | 追问可基于 EvidenceBundle 返回 answer 和 evidence_refs | `go test ./...` |
 | 2026-06-11 | 增加 ActionSuggestion 确认 API | 待确认草稿可经 confirm endpoint 进入 succeeded 状态并保留 evidence_refs | `go test ./...` |

@@ -23,6 +23,8 @@ type Store struct {
 	pool *pgxpool.Pool
 }
 
+var ErrNotFound = errors.New("not found")
+
 type RepositoryInput struct {
 	GitHubID int64
 	Owner    string
@@ -110,6 +112,13 @@ type LLMProviderConfig struct {
 	Configured  bool   `json:"configured"`
 	KeyLastFour string `json:"key_last_four"`
 	Enabled     bool   `json:"enabled"`
+}
+
+type ActiveLLMProviderConfig struct {
+	Provider string `json:"provider"`
+	BaseURL  string `json:"base_url"`
+	Model    string `json:"model"`
+	APIKey   string `json:"api_key"`
 }
 
 type EvidenceBundle struct {
@@ -648,6 +657,46 @@ func (store *Store) ListLLMProviderConfigs(ctx context.Context) ([]LLMProviderCo
 	}
 
 	return configs, nil
+}
+
+func (store *Store) GetActiveLLMProviderConfig(
+	ctx context.Context,
+) (ActiveLLMProviderConfig, error) {
+	var config ActiveLLMProviderConfig
+	var ciphertext string
+	err := store.pool.QueryRow(
+		ctx,
+		`
+		SELECT provider, base_url, model, api_key_ciphertext
+		FROM llm_provider_configs
+		WHERE enabled = true
+		  AND provider IN ('openai', 'deepseek')
+		ORDER BY CASE provider
+		  WHEN 'openai' THEN 1
+		  WHEN 'deepseek' THEN 2
+		  ELSE 3
+		END
+		LIMIT 1
+		`,
+	).Scan(
+		&config.Provider,
+		&config.BaseURL,
+		&config.Model,
+		&ciphertext,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ActiveLLMProviderConfig{}, ErrNotFound
+	}
+	if err != nil {
+		return ActiveLLMProviderConfig{}, fmt.Errorf("get active llm provider config: %w", err)
+	}
+
+	apiKey, err := decryptAPIKey(ciphertext)
+	if err != nil {
+		return ActiveLLMProviderConfig{}, err
+	}
+	config.APIKey = apiKey
+	return config, nil
 }
 
 func (store *Store) GetEvidenceBundle(
@@ -1521,20 +1570,9 @@ func (store *Store) listAgentSteps(ctx context.Context, agentRunID string) ([]Ag
 }
 
 func encryptAPIKey(apiKey string) (string, error) {
-	secret := os.Getenv("DEV_TIME_LLM_KEY_SECRET")
-	if secret == "" {
-		secret = "dev-time-local-development-key"
-	}
-
-	key := sha256.Sum256([]byte(secret))
-	block, err := aes.NewCipher(key[:])
+	gcm, err := apiKeyCipher()
 	if err != nil {
-		return "", fmt.Errorf("create api key cipher: %w", err)
-	}
-
-	gcm, err := cipher.NewGCM(block)
-	if err != nil {
-		return "", fmt.Errorf("create api key gcm: %w", err)
+		return "", err
 	}
 
 	nonce := make([]byte, gcm.NonceSize())
@@ -1544,6 +1582,53 @@ func encryptAPIKey(apiKey string) (string, error) {
 
 	ciphertext := gcm.Seal(nonce, nonce, []byte(apiKey), nil)
 	return "aes-gcm:" + base64.StdEncoding.EncodeToString(ciphertext), nil
+}
+
+func decryptAPIKey(ciphertext string) (string, error) {
+	const prefix = "aes-gcm:"
+	if len(ciphertext) <= len(prefix) || ciphertext[:len(prefix)] != prefix {
+		return "", fmt.Errorf("unsupported api key ciphertext format")
+	}
+
+	rawCiphertext, err := base64.StdEncoding.DecodeString(ciphertext[len(prefix):])
+	if err != nil {
+		return "", fmt.Errorf("decode api key ciphertext: %w", err)
+	}
+
+	gcm, err := apiKeyCipher()
+	if err != nil {
+		return "", err
+	}
+	if len(rawCiphertext) < gcm.NonceSize() {
+		return "", fmt.Errorf("api key ciphertext is too short")
+	}
+
+	nonce := rawCiphertext[:gcm.NonceSize()]
+	encryptedAPIKey := rawCiphertext[gcm.NonceSize():]
+	apiKey, err := gcm.Open(nil, nonce, encryptedAPIKey, nil)
+	if err != nil {
+		return "", fmt.Errorf("decrypt api key: %w", err)
+	}
+	return string(apiKey), nil
+}
+
+func apiKeyCipher() (cipher.AEAD, error) {
+	secret := os.Getenv("DEV_TIME_LLM_KEY_SECRET")
+	if secret == "" {
+		secret = "dev-time-local-development-key"
+	}
+
+	key := sha256.Sum256([]byte(secret))
+	block, err := aes.NewCipher(key[:])
+	if err != nil {
+		return nil, fmt.Errorf("create api key cipher: %w", err)
+	}
+
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, fmt.Errorf("create api key gcm: %w", err)
+	}
+	return gcm, nil
 }
 
 func lastFour(value string) string {

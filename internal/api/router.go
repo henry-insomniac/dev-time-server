@@ -65,6 +65,7 @@ func NewRouter(dependencies ...Dependencies) http.Handler {
 	router.Post("/api/agent-conversations/{conversationID}/turns", server.handleAgentConversationTurn)
 	router.Post("/api/action-suggestions/{suggestionID}/confirm", server.handleConfirmActionSuggestion)
 	router.Post("/api/risk-assessments/{assessmentID}/refresh-agent", server.handleRefreshAgent)
+	router.Get("/internal/llm-provider-config", server.handleInternalLLMProviderConfig)
 	router.Post("/internal/agent-jobs/claim", server.handleClaimAgentJob)
 	router.Post("/internal/agent-jobs/{jobID}/complete", server.handleCompleteAgentJob)
 	return router
@@ -446,6 +447,25 @@ func mergeSupportedLLMProviderConfigs(configs []db.LLMProviderConfig) []db.LLMPr
 	}
 
 	return merged
+}
+
+func (server server) handleInternalLLMProviderConfig(response http.ResponseWriter, request *http.Request) {
+	if server.store == nil {
+		writeJSON(response, http.StatusServiceUnavailable, map[string]string{
+			"error": "repository store is not configured",
+		})
+		return
+	}
+
+	config, err := server.store.GetActiveLLMProviderConfig(request.Context())
+	if err != nil {
+		writeJSON(response, http.StatusNotFound, map[string]string{
+			"error": "active llm provider is not configured",
+		})
+		return
+	}
+
+	writeJSON(response, http.StatusOK, config)
 }
 
 func (server server) handleEvidenceBundle(response http.ResponseWriter, request *http.Request) {
