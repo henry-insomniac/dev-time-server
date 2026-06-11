@@ -33,11 +33,45 @@
 
 ## 当前目录结构
 
-请在项目初始化后补充真实目录结构。
-
 ```text
 .
+├── .env.example
+├── .gitignore
 ├── AGENTS.md
+├── cmd/
+│   └── dev-time-server/
+│       └── main.go
+├── internal/
+│   ├── api/
+│   │   ├── action_suggestions_test.go
+│   │   ├── agent_jobs_test.go
+│   │   ├── agent_conversation_test.go
+│   │   ├── evidence_bundle_test.go
+│   │   ├── llm_providers_test.go
+│   │   ├── projects_test.go
+│   │   ├── repositories_test.go
+│   │   ├── risk_test.go
+│   │   ├── router.go
+│   │   ├── router_test.go
+│   │   └── webhook_test.go
+│   ├── buildinfo/
+│   │   ├── buildinfo.go
+│   │   └── buildinfo_test.go
+│   ├── config/
+│   │   ├── config.go
+│   │   └── config_test.go
+│   ├── db/
+│   │   ├── migrations/
+│   │   │   ├── 0001_initial.sql
+│   │   │   ├── 0002_llm_provider_configs.sql
+│   │   │   └── 0003_agent_conversations.sql
+│   │   ├── migrations.go
+│   │   ├── store.go
+│   │   └── store_test.go
+│   └── testsupport/
+│       └── postgres.go
+├── go.mod
+├── go.sum
 └── .claude/
     ├── README.md
     ├── product-prd.md
@@ -76,6 +110,22 @@ Dev Time 跨端技术架构。定义 GitHub 事实源、事件流、风险引擎
 
 后端编码规范、Go / PostgreSQL 数据访问约束、行数约束和评审检查项。
 
+### `cmd/dev-time-server/`
+
+后端服务入口。当前启动 HTTP server，并挂载 `GET /healthz`。
+
+### `internal/`
+
+后端内部包目录。
+
+- `api/`：HTTP router 和 handler。当前包含 `GET /healthz`、`GET /api/projects`、`POST /api/github/repositories/import`、`POST /api/github/webhook`、`GET /api/projects/{projectID}/risk`、`GET /api/settings/llm-providers`、`POST /api/settings/llm-providers`、`POST /api/risk-assessments/{assessmentID}/refresh-agent`、`POST /internal/agent-jobs/claim`、`POST /internal/agent-jobs/{jobID}/complete`、`GET /internal/risk-assessments/{assessmentID}/evidence-bundle`、`GET /api/projects/{projectID}/agent-conversation`、`POST /api/agent-conversations/{conversationID}/turns` 和 `POST /api/action-suggestions/{suggestionID}/confirm`。AgentJob completion 可在同一事务保存 AgentArtifact 和关联 ActionSuggestion，并返回 `action_suggestion_ids`。
+- `buildinfo/`：服务标识和构建信息。
+- `config/`：环境变量配置读取。
+- `db/`：PostgreSQL migration runner、基础 store API、Event Store、RiskAssessment 持久化、AgentJob 队列、AgentArtifact 保存、LLM provider key 加密存储、AgentConversation / ActionSuggestion 持久化和容器化集成测试。
+- `testsupport/`：测试辅助能力。当前提供 PostgreSQL Testcontainers 启动、migration 和 Store 初始化。
+
+后续按 `github`、`risk`、`agentjobs`、`actionsuggestions` 等领域扩展。
+
 ### `.agents/skills/`
 
 可选的项目级 Agent Skills 目录。只有在项目明确需要可复用 Agent 工作流时才创建。新增 skill 时，应同步说明触发条件、输入输出、验证方式和安全边界。
@@ -97,3 +147,15 @@ Dev Time 跨端技术架构。定义 GitHub 事实源、事件流、风险引擎
 | --- | --- | --- | --- |
 | 2026-06-10 | 初始化 Agent 项目文档 | 建立项目长期上下文和协作基线 | 已创建 `AGENTS.md` 与 `.claude` 文档 |
 | 2026-06-10 | 补充 Dev Time 产品 PRD 和技术架构基线 | 明确 GitHub 风险驾驶舱、风险模型和 Agent 落地场景 | 已新增 `product-prd.md` 与 `technical-architecture.md` |
+| 2026-06-11 | 初始化 Go 工程骨架 | 建立 M0 可验证后端基础 | `go test ./...` |
+| 2026-06-11 | 增加 health/config 和 PostgreSQL 基线 | 建立 M1/M2 后端可运行入口和数据库 schema 基线 | `go test ./...` |
+| 2026-06-11 | 增加 GitHub repository import API | 建立 M3 repo 导入到 Project 的 HTTP 纵向切片 | `go test ./...` |
+| 2026-06-11 | 增加 GitHub webhook Event Store | 建立 M4 webhook 事实落库和 delivery 幂等切片 | `go test ./...` |
+| 2026-06-11 | 增加 Risk Engine v1 首条规则 | check_run failure 可生成 blocked RiskSignal 和 high RiskAssessment | `go test ./...` |
+| 2026-06-11 | 增加项目风险队列 API | `GET /api/projects` 可按风险分降序返回项目 | `go test ./...` |
+| 2026-06-11 | 增加 LLM Provider 配置 API | 保存 API key 时加密存储，GET/POST 不回传明文 key | `go test ./...` |
+| 2026-06-11 | 增加 EvidenceBundle internal API | Agent 可通过 risk assessment id 获取受控证据包 | `go test ./...` |
+| 2026-06-11 | 增加 Agent Conversation API | 追问可基于 EvidenceBundle 返回 answer 和 evidence_refs | `go test ./...` |
+| 2026-06-11 | 增加 ActionSuggestion 确认 API | 待确认草稿可经 confirm endpoint 进入 succeeded 状态并保留 evidence_refs | `go test ./...` |
+| 2026-06-11 | 增加 AgentJob queue API | 可创建、claim、complete AgentJob，并保存 AgentArtifact | `go test ./...` |
+| 2026-06-11 | 扩展 AgentJob completion payload | Agent 完成任务时可一并保存 ActionSuggestion 草稿并返回建议 ID | `go test ./...` |
