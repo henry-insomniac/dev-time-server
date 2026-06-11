@@ -13,6 +13,25 @@ Dev Time 的技术架构服务于一个核心目标：从 GitHub 事实源中持
 5. 外部写入默认需要用户确认。
 6. LLM provider key 必须加密存储，后端不回传明文。
 
+
+## 服务拆分决策
+
+Dev Time 采用三服务架构：
+
+```text
+dev-time          Browser Web App
+dev-time-server   Core API + GitHub facts + risk state
+dev-time-agent    Agent Runtime + workflow orchestration + evals
+```
+
+拆分原则：
+
+- `dev-time` 负责用户体验、风险工作台、Agent 建议展示和用户确认。
+- `dev-time-server` 负责用户、团队、权限、GitHub App、webhook、Event Store、Project Model、RiskSignal、RiskAssessment 和确认后的 GitHub 写入。
+- `dev-time-agent` 负责 AgentJob 消费、EvidenceBundle 构建、Agent workflow 编排、LLM 调用、结构化输出校验、ActionSuggestion 草稿、prompt 版本和 eval/replay。
+
+`dev-time-agent` 不维护 canonical 业务状态，不直接执行 GitHub 写入，不作为面向用户的聊天服务。
+
 ## 形态决策
 
 MVP 优先建设 Web 服务，而不是本地桌面 App。
@@ -24,6 +43,7 @@ Browser Web App
 + API Server
 + GitHub App
 + Background Workers
++ Agent Runtime Service
 + LLM Gateway
 + Notification Layer
 ```
@@ -49,12 +69,16 @@ Client App
 -> Event Store
 -> Project Model
 -> Risk Engine
--> Agent Runtime
--> LLM Gateway
+-> Agent Job Queue
+-> dev-time-agent
+-> AgentArtifact / ActionSuggestion
 -> Notification Layer
 ```
 
 ## 架构图
+
+> 当前架构以三服务拆分为准。下方 SVG 是早期整体数据流图，用于理解 GitHub -> 风险 -> Agent -> Dashboard 的主路径；`dev-time-agent` 的独立服务边界以 `dev-time-agent-architecture.md` 为准。
+
 
 ```svg
 <svg width="1180" height="760" viewBox="0 0 1180 760" xmlns="http://www.w3.org/2000/svg">
@@ -267,33 +291,26 @@ Notification
 - 每个风险分必须能追溯到 RiskSignal。
 - LLM 不负责最终分数，只负责补充解释和建议。
 
-### Agent Runtime
+### Agent Service Boundary
+
+Agent Runtime 由独立的 `dev-time-agent` 服务承载。
 
 职责：
 
-- 执行 Risk Scout、Daily Brief、Milestone Planner、PR Risk、Scope Drift、Action Agent。
-- 组织上下文、调用 LLM Gateway、保存 AgentRun。
-- 把 Agent 输出绑定到 RiskAssessment 和 ActionSuggestion。
+- 消费 `dev-time-server` 创建的 AgentJob。
+- 通过 server internal API 获取 EvidenceBundle。
+- 执行 Risk Scout、PR Doctor、Milestone Planner、Scope Guard、Daily Brief、Action Drafter 等 workflow。
+- 调用 LLM Gateway，校验结构化输出。
+- 生成 AgentArtifact 和 ActionSuggestion 草稿。
+- 记录 AgentRun、prompt version、token usage、cost estimate 和 evidence_refs。
 
-AgentRun 必须记录：
-
-```text
-agent_type
-input_summary
-evidence_refs
-provider
-model
-token_usage
-cost_estimate
-output
-created_at
-```
+Agent 输出必须返回给 `dev-time-server` 保存，并由前端展示。`dev-time-agent` 不直接写 GitHub，不维护 canonical 业务状态。
 
 ### LLM Gateway
 
 职责：
 
-- 统一适配 OpenAI、Anthropic、Gemini 和 OpenAI-compatible endpoint。
+- 主要由 `dev-time-agent` 使用，统一适配 OpenAI、Anthropic、Gemini 和 OpenAI-compatible endpoint。
 - 管理模型选择、超时、重试、成本记录。
 - 隔离用户 API Key。
 
@@ -325,8 +342,9 @@ GitHub webhook / scheduled sync
 -> Risk Engine
 -> RiskSignal
 -> RiskAssessment
--> Agent Runtime
--> LLM explanation
+-> AgentJob queue
+-> dev-time-agent builds EvidenceBundle
+-> AgentArtifact / ActionSuggestion
 -> Dashboard / Notification
 ```
 
@@ -346,10 +364,12 @@ User opens dashboard
 
 ```text
 RiskAssessment
--> Agent generates action draft
+-> dev-time-server creates AgentJob
+-> dev-time-agent generates ActionSuggestion draft
+-> dev-time-server stores draft
 -> user reviews
 -> user confirms
--> GitHub write API
+-> dev-time-server executes GitHub write API
 -> new GitHub event
 -> risk recalculation
 ```
@@ -387,7 +407,7 @@ POST   /api/action-suggestions/:id/confirm
 
 ### dev-time-server
 
-后端服务，负责 GitHub 集成、事件存储、项目模型、风险引擎、Agent Runtime、LLM Gateway、通知和安全边界。
+后端服务，负责 GitHub 集成、事件存储、项目模型、风险引擎、AgentJob 创建、AgentArtifact 保存、LLM key 管理、通知和安全边界。
 
 ## MVP 技术优先级
 
@@ -397,9 +417,11 @@ POST   /api/action-suggestions/:id/confirm
 4. RiskSignal 和 RiskAssessment。
 5. Risk Dashboard API。
 6. LLM Provider 配置。
-7. Risk Scout Agent 和 Daily Brief Agent。
-8. 风险证据链。
-9. ActionSuggestion 草稿。
+7. AgentJob queue 和 `dev-time-agent` 服务骨架。
+8. EvidenceBundle schema。
+9. Risk Scout 和 PR Doctor workflow。
+10. 风险证据链。
+11. ActionSuggestion 草稿。
 
 ## 需要避免的架构偏差
 

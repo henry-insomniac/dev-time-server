@@ -8,12 +8,13 @@
 
 ## 跨项目基础文档
 
-以下文档属于 Dev Time 产品级基础文档，必须在 `dev-time` 和 `dev-time-server` 两个仓库中保持同源更新：
+以下文档属于 Dev Time 产品级基础文档，必须在 `dev-time`、`dev-time-server` 和 `dev-time-agent` 三个仓库中保持同源更新：
 
 - `product-prd.md`：产品定位、目标用户、MVP、风险模型、Agent 场景、信息架构和视觉方向。
 - `technical-architecture.md`：GitHub 集成、事件存储、项目模型、风险引擎、Agent Runtime、LLM Gateway、通知层、API 边界和 SVG 架构图。
+- `dev-time-agent-architecture.md`：Agent Runtime 服务的定位、边界、工作流、数据契约、安全约束和 MVP 阶段建议。
 
-当变更影响产品定位、风险模型、Agent 落地场景、GitHub 数据边界、跨端技术架构或安全原则时，必须同步更新两个仓库的对应文档。仅影响后端实现细节、服务模块、数据表、任务队列或本仓库工具链时，只更新本仓库相关文档。
+当变更影响产品定位、风险模型、Agent 落地场景、Agent 服务边界、GitHub 数据边界、跨端技术架构或安全原则时，必须同步更新三个仓库中的对应文档。仅影响后端实现细节、服务模块、数据表、任务队列或本仓库工具链时，只更新本仓库相关文档。
 
 ## 当前仓库职责
 
