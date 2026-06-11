@@ -38,6 +38,7 @@
 - 风险评分由规则引擎生成，LLM 只负责解释、归因和行动建议。
 - `dev-time-server` 管事实、权限和 canonical state；`dev-time-agent` 管推理和建议。
 - GitHub 写入必须来自用户确认后的 ActionSuggestion，并在服务端重新校验权限。
+- LLM Provider 当前只允许 OpenAI 和 DeepSeek；API 必须拒绝后端白名单外的 provider。
 - LLM provider key 由后端加密存储，API 不回传明文。
 - 后端日志不得输出 GitHub token、LLM key、webhook secret 或 private repo 的非必要全文。
 

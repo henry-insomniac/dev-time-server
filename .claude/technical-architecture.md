@@ -402,7 +402,8 @@ edited
 
 职责：
 
-- 主要由 `dev-time-agent` 使用，统一适配 OpenAI、Anthropic、Gemini 和 OpenAI-compatible endpoint。
+- 主要由 `dev-time-agent` 使用；当前 MVP 只启用 OpenAI 和 DeepSeek，DeepSeek 通过 OpenAI-compatible endpoint 接入。
+- 新增 Provider 必须同步更新前端设置页、后端 Provider 白名单和 Agent adapter。
 - 管理模型选择、超时、重试、成本记录。
 - 隔离用户 API Key。
 

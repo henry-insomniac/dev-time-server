@@ -3,6 +3,7 @@ package api_test
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"net/http"
 	"testing"
 	"time"
@@ -45,5 +46,65 @@ func TestLLMProviderConfigDoesNotReturnPlaintextAPIKey(t *testing.T) {
 	}
 	if !bytes.Contains(getResponse.Body.Bytes(), []byte(`"configured":true`)) {
 		t.Fatalf("expected configured flag in response, got %s", getResponse.Body.String())
+	}
+}
+
+func TestLLMProviderSettingsExposeSupportedProviders(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	store := testsupport.NewMigratedStore(t, ctx)
+	router := api.NewRouter(api.Dependencies{Store: store})
+
+	response := performJSONRequest(router, http.MethodGet, "/api/settings/llm-providers", nil)
+	if response.Code != http.StatusOK {
+		t.Fatalf("expected get status 200, got %d: %s", response.Code, response.Body.String())
+	}
+
+	var body struct {
+		Providers []struct {
+			Provider   string `json:"provider"`
+			BaseURL    string `json:"base_url"`
+			Model      string `json:"model"`
+			Configured bool   `json:"configured"`
+		} `json:"providers"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&body); err != nil {
+		t.Fatalf("decode providers: %v", err)
+	}
+	if len(body.Providers) != 2 {
+		t.Fatalf("expected openai and deepseek providers, got %#v", body.Providers)
+	}
+	if body.Providers[0].Provider != "openai" || body.Providers[0].BaseURL == "" || body.Providers[0].Model == "" {
+		t.Fatalf("expected openai defaults, got %#v", body.Providers[0])
+	}
+	if body.Providers[1].Provider != "deepseek" || body.Providers[1].BaseURL == "" || body.Providers[1].Model == "" {
+		t.Fatalf("expected deepseek defaults, got %#v", body.Providers[1])
+	}
+	if body.Providers[0].Configured || body.Providers[1].Configured {
+		t.Fatalf("expected unconfigured defaults, got %#v", body.Providers)
+	}
+}
+
+func TestLLMProviderSettingsRejectUnsupportedProvider(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	store := testsupport.NewMigratedStore(t, ctx)
+	router := api.NewRouter(api.Dependencies{Store: store})
+
+	response := performJSONRequest(
+		router,
+		http.MethodPost,
+		"/api/settings/llm-providers",
+		[]byte(`{
+			"provider": "anthropic",
+			"base_url": "https://api.anthropic.com",
+			"model": "claude",
+			"api_key": "secret"
+		}`),
+	)
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("expected unsupported provider status 400, got %d: %s", response.Code, response.Body.String())
 	}
 }

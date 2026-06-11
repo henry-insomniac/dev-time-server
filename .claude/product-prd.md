@@ -105,8 +105,8 @@ dev-time-agent    Agent Runtime：上下文构建、工作流编排、LLM 调用
 
 ### LLM Provider 配置
 
-- 支持 OpenAI、Anthropic、Gemini 和 OpenAI-compatible endpoint。
-- 用户可配置 API Key、base URL、model 和用途。
+- 当前支持 OpenAI 和 DeepSeek；DeepSeek 通过 OpenAI-compatible endpoint 接入。
+- 用户必须能在前端 LLM 设置页配置 API Key、base URL 和 model。
 - 后端加密存储 key，不向前端回传明文。
 - 记录 Agent 调用模型、token 和成本估算。
 

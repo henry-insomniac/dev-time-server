@@ -20,6 +20,25 @@ type server struct {
 	store *db.Store
 }
 
+type llmProviderPreset struct {
+	Provider string
+	BaseURL  string
+	Model    string
+}
+
+var supportedLLMProviderPresets = []llmProviderPreset{
+	{
+		Provider: "openai",
+		BaseURL:  "https://api.openai.com/v1",
+		Model:    "gpt-4.1",
+	},
+	{
+		Provider: "deepseek",
+		BaseURL:  "https://api.deepseek.com/v1",
+		Model:    "deepseek-chat",
+	},
+}
+
 func NewRouter(dependencies ...Dependencies) http.Handler {
 	loaded := Dependencies{}
 	if len(dependencies) > 0 {
@@ -339,6 +358,16 @@ func (server server) handleSaveLLMProvider(response http.ResponseWriter, request
 		})
 		return
 	}
+	input.Provider = strings.ToLower(strings.TrimSpace(input.Provider))
+	input.BaseURL = strings.TrimSpace(input.BaseURL)
+	input.Model = strings.TrimSpace(input.Model)
+	input.APIKey = strings.TrimSpace(input.APIKey)
+	if !isSupportedLLMProvider(input.Provider) {
+		writeJSON(response, http.StatusBadRequest, map[string]string{
+			"error": "provider must be openai or deepseek",
+		})
+		return
+	}
 	if input.Provider == "" || input.BaseURL == "" || input.Model == "" || input.APIKey == "" {
 		writeJSON(response, http.StatusBadRequest, map[string]string{
 			"error": "provider, base_url, model, and api_key are required",
@@ -381,8 +410,42 @@ func (server server) handleListLLMProviders(response http.ResponseWriter, reques
 	writeJSON(response, http.StatusOK, struct {
 		Providers []db.LLMProviderConfig `json:"providers"`
 	}{
-		Providers: configs,
+		Providers: mergeSupportedLLMProviderConfigs(configs),
 	})
+}
+
+func isSupportedLLMProvider(provider string) bool {
+	for _, preset := range supportedLLMProviderPresets {
+		if provider == preset.Provider {
+			return true
+		}
+	}
+	return false
+}
+
+func mergeSupportedLLMProviderConfigs(configs []db.LLMProviderConfig) []db.LLMProviderConfig {
+	configsByProvider := map[string]db.LLMProviderConfig{}
+	for _, config := range configs {
+		configsByProvider[config.Provider] = config
+	}
+
+	merged := make([]db.LLMProviderConfig, 0, len(supportedLLMProviderPresets))
+	for _, preset := range supportedLLMProviderPresets {
+		if config, exists := configsByProvider[preset.Provider]; exists {
+			merged = append(merged, config)
+			continue
+		}
+		merged = append(merged, db.LLMProviderConfig{
+			ID:         "llm_provider_" + preset.Provider,
+			Provider:   preset.Provider,
+			BaseURL:    preset.BaseURL,
+			Model:      preset.Model,
+			Configured: false,
+			Enabled:    false,
+		})
+	}
+
+	return merged
 }
 
 func (server server) handleEvidenceBundle(response http.ResponseWriter, request *http.Request) {
