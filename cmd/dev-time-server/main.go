@@ -30,7 +30,10 @@ func main() {
 
 	if err := http.ListenAndServe(
 		loaded.ServerAddr,
-		api.NewRouter(api.Dependencies{Store: db.NewStore(pool)}),
+		api.NewRouter(api.Dependencies{
+			Store:               db.NewStore(pool),
+			AgentRuntimeBaseURL: loaded.AgentRuntimeBaseURL,
+		}),
 	); err != nil {
 		log.Fatalf("server stopped: %v", err)
 	}

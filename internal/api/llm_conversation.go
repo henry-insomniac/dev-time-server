@@ -17,28 +17,107 @@ var llmHTTPClient = &http.Client{Timeout: 30 * time.Second}
 
 func (server server) buildAgentConversationReply(
 	ctx context.Context,
+	conversationID string,
 	riskAssessmentID string,
 	userMessage string,
-) (string, []string, error) {
+) (string, []string, string, error) {
 	bundle, err := server.store.GetEvidenceBundle(ctx, riskAssessmentID)
 	if err != nil {
-		return "", nil, err
+		return "", nil, "", err
 	}
+
+	if strings.TrimSpace(server.agentRuntimeBaseURL) != "" {
+		reply, evidenceRefs, intent, err := requestAgentRuntimeConversationReply(
+			ctx,
+			server.agentRuntimeBaseURL,
+			conversationID,
+			riskAssessmentID,
+			userMessage,
+			bundle,
+		)
+		if err == nil {
+			return reply, evidenceRefs, intent, nil
+		}
+	}
+
+	intent := classifyConversationIntent(userMessage)
+	if intent == "smalltalk" {
+		return "你好，我是 Dev Time Agent。你可以让我解释当前风险、查看证据，或生成下一步行动计划。", nil, "smalltalk", nil
+	}
+
 	evidenceRefs := evidenceRefsFromSignals(bundle.Signals)
+	if intent == "action_plan" {
+		return fallbackActionPlanReply(bundle), evidenceRefs, "action_plan", nil
+	}
 
 	config, err := server.store.GetActiveLLMProviderConfig(ctx)
 	if errors.Is(err, db.ErrNotFound) {
-		return fallbackAgentConversationReply(bundle), evidenceRefs, nil
+		return fallbackAgentConversationReply(bundle), evidenceRefs, "risk_explain", nil
 	}
 	if err != nil {
-		return "", nil, err
+		return "", nil, "", err
 	}
 
 	reply, err := requestLLMConversationReply(ctx, config, bundle, userMessage)
 	if err != nil {
-		return "", nil, err
+		return "", nil, "", err
 	}
-	return reply, evidenceRefs, nil
+	return reply, evidenceRefs, "risk_explain", nil
+}
+
+func requestAgentRuntimeConversationReply(
+	ctx context.Context,
+	baseURL string,
+	conversationID string,
+	riskAssessmentID string,
+	userMessage string,
+	bundle db.EvidenceBundle,
+) (string, []string, string, error) {
+	payload := map[string]any{
+		"conversation_id":    conversationID,
+		"risk_assessment_id": riskAssessmentID,
+		"message":            userMessage,
+		"evidence_bundle":    bundle,
+	}
+	rawPayload, err := json.Marshal(payload)
+	if err != nil {
+		return "", nil, "", fmt.Errorf("marshal agent runtime payload: %w", err)
+	}
+
+	request, err := http.NewRequestWithContext(
+		ctx,
+		http.MethodPost,
+		strings.TrimRight(baseURL, "/")+"/conversation/turn",
+		bytes.NewReader(rawPayload),
+	)
+	if err != nil {
+		return "", nil, "", fmt.Errorf("create agent runtime request: %w", err)
+	}
+	request.Header.Set("Accept", "application/json")
+	request.Header.Set("Content-Type", "application/json")
+
+	response, err := llmHTTPClient.Do(request)
+	if err != nil {
+		return "", nil, "", fmt.Errorf("call agent runtime: %w", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		return "", nil, "", fmt.Errorf("agent runtime returned status %d", response.StatusCode)
+	}
+
+	var body struct {
+		AgentResponse string   `json:"agent_response"`
+		EvidenceRefs  []string `json:"evidence_refs"`
+		Intent        string   `json:"intent"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&body); err != nil {
+		return "", nil, "", fmt.Errorf("decode agent runtime response: %w", err)
+	}
+	if strings.TrimSpace(body.AgentResponse) == "" || strings.TrimSpace(body.Intent) == "" {
+		return "", nil, "", fmt.Errorf("agent runtime response is incomplete")
+	}
+
+	return strings.TrimSpace(body.AgentResponse), body.EvidenceRefs, strings.TrimSpace(body.Intent), nil
 }
 
 func requestLLMConversationReply(
@@ -124,6 +203,14 @@ func fallbackAgentConversationReply(bundle db.EvidenceBundle) string {
 	return "当前风险原因：" + bundle.Signals[0].Reason
 }
 
+func fallbackActionPlanReply(bundle db.EvidenceBundle) string {
+	reason := "暂无活跃风险信号"
+	if len(bundle.Signals) > 0 {
+		reason = bundle.Signals[0].Reason
+	}
+	return "行动计划：先确认阻塞证据，再定位失败检查，随后修复并重新运行测试。当前依据：" + reason
+}
+
 func evidenceRefsFromSignals(signals []db.RiskSignal) []string {
 	refs := []string{}
 	seen := map[string]bool{}
@@ -137,4 +224,18 @@ func evidenceRefsFromSignals(signals []db.RiskSignal) []string {
 		}
 	}
 	return refs
+}
+
+func classifyConversationIntent(message string) string {
+	normalized := strings.TrimSpace(strings.ToLower(message))
+	switch normalized {
+	case "你好", "您好", "hi", "hello", "hey":
+		return "smalltalk"
+	}
+	for _, keyword := range []string{"行动", "计划", "下一步", "怎么做"} {
+		if strings.Contains(normalized, keyword) {
+			return "action_plan"
+		}
+	}
+	return "risk_explain"
 }

@@ -13,11 +13,13 @@ import (
 )
 
 type Dependencies struct {
-	Store *db.Store
+	Store               *db.Store
+	AgentRuntimeBaseURL string
 }
 
 type server struct {
-	store *db.Store
+	store               *db.Store
+	agentRuntimeBaseURL string
 }
 
 type llmProviderPreset struct {
@@ -45,7 +47,10 @@ func NewRouter(dependencies ...Dependencies) http.Handler {
 		loaded = dependencies[0]
 	}
 
-	server := server{store: loaded.Store}
+	server := server{
+		store:               loaded.Store,
+		agentRuntimeBaseURL: loaded.AgentRuntimeBaseURL,
+	}
 	router := chi.NewRouter()
 	router.Use(localDevCORS)
 	router.Get("/healthz", handleHealthz)
@@ -553,8 +558,9 @@ func (server server) handleAgentConversationTurn(response http.ResponseWriter, r
 		return
 	}
 
-	agentResponse, evidenceRefs, err := server.buildAgentConversationReply(
+	agentResponse, evidenceRefs, intent, err := server.buildAgentConversationReply(
 		request.Context(),
+		conversationID,
 		input.RiskAssessmentID,
 		input.Message,
 	)
@@ -571,6 +577,7 @@ func (server server) handleAgentConversationTurn(response http.ResponseWriter, r
 		input.Message,
 		agentResponse,
 		evidenceRefs,
+		intent,
 	)
 	if err != nil {
 		writeJSON(response, http.StatusInternalServerError, map[string]string{

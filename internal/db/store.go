@@ -143,10 +143,23 @@ type AgentConversation struct {
 }
 
 type AgentConversationTurn struct {
+	ID             string            `json:"id"`
+	ConversationID string            `json:"conversation_id"`
+	UserMessage    string            `json:"user_message"`
+	AgentResponse  string            `json:"agent_response"`
+	EvidenceRefs   []string          `json:"evidence_refs"`
+	Intent         string            `json:"intent"`
+	TraceEvents    []AgentTraceEvent `json:"trace_events"`
+}
+
+type AgentTraceEvent struct {
 	ID             string   `json:"id"`
 	ConversationID string   `json:"conversation_id"`
-	UserMessage    string   `json:"user_message"`
-	AgentResponse  string   `json:"agent_response"`
+	TurnID         string   `json:"turn_id"`
+	EventType      string   `json:"event_type"`
+	Title          string   `json:"title"`
+	Body           string   `json:"body"`
+	Intent         string   `json:"intent"`
 	EvidenceRefs   []string `json:"evidence_refs"`
 }
 
@@ -888,6 +901,7 @@ func (store *Store) AddAgentConversationTurn(
 	userMessage string,
 	agentResponse string,
 	evidenceRefs []string,
+	intent string,
 ) (AgentConversationTurn, error) {
 	rawEvidenceRefs, err := json.Marshal(evidenceRefs)
 	if err != nil {
@@ -900,6 +914,17 @@ func (store *Store) AddAgentConversationTurn(
 		UserMessage:    userMessage,
 		AgentResponse:  agentResponse,
 		EvidenceRefs:   evidenceRefs,
+		Intent:         intent,
+	}
+	traceEvent := AgentTraceEvent{
+		ID:             "trace_" + turn.ID,
+		ConversationID: conversationID,
+		TurnID:         turn.ID,
+		EventType:      "intent_routed",
+		Title:          "完成意图识别",
+		Body:           "Agent 已根据用户输入选择处理路径。",
+		Intent:         intent,
+		EvidenceRefs:   evidenceRefs,
 	}
 
 	if _, err := store.pool.Exec(
@@ -911,19 +936,52 @@ func (store *Store) AddAgentConversationTurn(
 			role,
 			user_message,
 			agent_response,
-			evidence_refs
+			evidence_refs,
+			intent
 		)
-		VALUES ($1, $2, 'agent', $3, $4, $5)
+		VALUES ($1, $2, 'agent', $3, $4, $5, $6)
 		`,
 		turn.ID,
 		turn.ConversationID,
 		turn.UserMessage,
 		turn.AgentResponse,
 		rawEvidenceRefs,
+		turn.Intent,
 	); err != nil {
 		return AgentConversationTurn{}, fmt.Errorf("insert agent conversation turn: %w", err)
 	}
+	rawTraceEvidenceRefs, err := json.Marshal(traceEvent.EvidenceRefs)
+	if err != nil {
+		return AgentConversationTurn{}, fmt.Errorf("marshal trace evidence refs: %w", err)
+	}
+	if _, err := store.pool.Exec(
+		ctx,
+		`
+		INSERT INTO agent_trace_events (
+			id,
+			conversation_id,
+			turn_id,
+			event_type,
+			title,
+			body,
+			intent,
+			evidence_refs
+		)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+		`,
+		traceEvent.ID,
+		traceEvent.ConversationID,
+		traceEvent.TurnID,
+		traceEvent.EventType,
+		traceEvent.Title,
+		traceEvent.Body,
+		traceEvent.Intent,
+		rawTraceEvidenceRefs,
+	); err != nil {
+		return AgentConversationTurn{}, fmt.Errorf("insert agent trace event: %w", err)
+	}
 
+	turn.TraceEvents = []AgentTraceEvent{traceEvent}
 	return turn, nil
 }
 

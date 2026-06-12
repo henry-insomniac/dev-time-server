@@ -3,8 +3,9 @@ package config
 import "os"
 
 type Config struct {
-	ServerAddr  string
-	DatabaseURL string
+	ServerAddr          string
+	DatabaseURL         string
+	AgentRuntimeBaseURL string
 }
 
 func Load() Config {
@@ -14,6 +15,7 @@ func Load() Config {
 			"DATABASE_URL",
 			"postgres://dev_time:dev_time@localhost:5432/dev_time?sslmode=disable",
 		),
+		AgentRuntimeBaseURL: os.Getenv("DEV_TIME_AGENT_RUNTIME_BASE_URL"),
 	}
 }
 
