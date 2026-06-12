@@ -203,6 +203,65 @@ func TestAgentConversationTurnIntroducesItselfWithoutRiskEvidence(t *testing.T) 
 	}
 }
 
+func TestAgentConversationTurnReportsProjectStatusWithoutRuntime(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	store := testsupport.NewMigratedStore(t, ctx)
+	router := api.NewRouter(api.Dependencies{Store: store})
+
+	projectID, assessmentID := createProjectRisk(t, router)
+
+	conversationResponse := performJSONRequest(
+		router,
+		http.MethodGet,
+		"/api/projects/"+projectID+"/agent-conversation?risk_assessment_id="+assessmentID,
+		nil,
+	)
+	if conversationResponse.Code != http.StatusOK {
+		t.Fatalf("expected conversation status 200, got %d: %s", conversationResponse.Code, conversationResponse.Body.String())
+	}
+
+	var conversation struct {
+		ID string `json:"id"`
+	}
+	if err := json.NewDecoder(conversationResponse.Body).Decode(&conversation); err != nil {
+		t.Fatalf("decode conversation response: %v", err)
+	}
+
+	turnResponse := performJSONRequest(
+		router,
+		http.MethodPost,
+		"/api/agent-conversations/"+conversation.ID+"/turns",
+		[]byte(`{
+			"message": "介绍当前状态",
+			"risk_assessment_id": "`+assessmentID+`"
+		}`),
+	)
+	if turnResponse.Code != http.StatusCreated {
+		t.Fatalf("expected turn status 201, got %d: %s", turnResponse.Code, turnResponse.Body.String())
+	}
+
+	var turn struct {
+		AgentResponse string   `json:"agent_response"`
+		EvidenceRefs  []string `json:"evidence_refs"`
+		Intent        string   `json:"intent"`
+	}
+	if err := json.NewDecoder(turnResponse.Body).Decode(&turn); err != nil {
+		t.Fatalf("decode turn response: %v", err)
+	}
+	if turn.Intent != "project_status" {
+		t.Fatalf("expected project_status intent, got %q", turn.Intent)
+	}
+	if !strings.Contains(turn.AgentResponse, "当前项目") ||
+		!strings.Contains(turn.AgentResponse, "高风险") {
+		t.Fatalf("expected project status response, got %q", turn.AgentResponse)
+	}
+	if len(turn.EvidenceRefs) != 1 || turn.EvidenceRefs[0] != "event_check-run-conversation-1" {
+		t.Fatalf("expected evidence refs from risk signal, got %#v", turn.EvidenceRefs)
+	}
+}
+
 func TestAgentConversationTurnClarifiesAmbiguousMessageWithoutLoadingEvidence(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
@@ -268,47 +327,35 @@ func TestAgentConversationTurnUsesConfiguredAgentRuntime(t *testing.T) {
 
 	var runtimeRequest struct {
 		ConversationID   string          `json:"conversation_id"`
+		ProjectID        string          `json:"project_id"`
 		RiskAssessmentID string          `json:"risk_assessment_id"`
 		Message          string          `json:"message"`
 		EvidenceBundle   json.RawMessage `json:"evidence_bundle"`
 	}
-	intentCalls := 0
-	turnCalls := 0
+	sessionTurnCalls := 0
 	agentRuntime := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		response.Header().Set("Content-Type", "application/json")
-		switch request.URL.Path {
-		case "/conversation/intent":
-			intentCalls++
-			var intentRequest struct {
-				Message string `json:"message"`
-			}
-			if err := json.NewDecoder(request.Body).Decode(&intentRequest); err != nil {
-				t.Fatalf("decode runtime intent request: %v", err)
-			}
-			if intentRequest.Message != "给我下一步行动计划" {
-				t.Fatalf("expected runtime intent message, got %q", intentRequest.Message)
-			}
-			_, _ = response.Write([]byte(`{
-				"intent": "action_plan",
-				"confidence": 0.9,
-				"requires_evidence": true,
-				"requires_tool": false,
-				"requires_approval": false,
-				"clarifying_question": ""
-			}`))
-		case "/conversation/turn":
-			turnCalls++
-			if err := json.NewDecoder(request.Body).Decode(&runtimeRequest); err != nil {
-				t.Fatalf("decode runtime request: %v", err)
-			}
-			_, _ = response.Write([]byte(`{
-				"agent_response": "Agent Runtime 已识别为行动规划请求。",
-				"evidence_refs": ["event_check-run-conversation-1"],
-				"intent": "action_plan"
-			}`))
-		default:
+		if !strings.HasPrefix(request.URL.Path, "/agent/sessions/") ||
+			!strings.HasSuffix(request.URL.Path, "/turns") {
 			t.Fatalf("expected conversation runtime path, got %s", request.URL.Path)
 		}
+		sessionTurnCalls++
+		if err := json.NewDecoder(request.Body).Decode(&runtimeRequest); err != nil {
+			t.Fatalf("decode runtime request: %v", err)
+		}
+		_, _ = response.Write([]byte(`{
+			"session_id": "conversation_project_repo_1001",
+			"conversation_id": "conversation_project_repo_1001",
+			"user_message": "给我下一步行动计划",
+			"agent_response": "Agent Runtime 已识别为行动规划请求。",
+			"intent": "action_plan",
+			"confidence": 0.9,
+			"evidence_refs": ["event_check-run-conversation-1"],
+			"current_node": "planner",
+			"trace_events": [{"node":"planner","title":"生成行动计划"}],
+			"tool_calls": [],
+			"approval_request": null
+		}`))
 	}))
 	defer agentRuntime.Close()
 
@@ -357,8 +404,8 @@ func TestAgentConversationTurnUsesConfiguredAgentRuntime(t *testing.T) {
 	if runtimeRequest.ConversationID != conversation.ID {
 		t.Fatalf("expected runtime conversation id %q, got %q", conversation.ID, runtimeRequest.ConversationID)
 	}
-	if intentCalls != 1 || turnCalls != 1 {
-		t.Fatalf("expected one intent call and one turn call, got intent=%d turn=%d", intentCalls, turnCalls)
+	if sessionTurnCalls != 2 {
+		t.Fatalf("expected two session turn calls, got %d", sessionTurnCalls)
 	}
 	if runtimeRequest.RiskAssessmentID != assessmentID {
 		t.Fatalf("expected runtime risk assessment id %q, got %q", assessmentID, runtimeRequest.RiskAssessmentID)
@@ -384,27 +431,27 @@ func TestAgentConversationTurnUsesRuntimeIntentBeforeEvidence(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 
-	intentCalls := 0
-	turnCalls := 0
+	sessionTurnCalls := 0
 	agentRuntime := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		response.Header().Set("Content-Type", "application/json")
-		switch request.URL.Path {
-		case "/conversation/intent":
-			intentCalls++
-			_, _ = response.Write([]byte(`{
-				"intent": "clarify",
-				"confidence": 0.35,
-				"requires_evidence": false,
-				"requires_tool": false,
-				"requires_approval": false,
-				"clarifying_question": "你想让我评估当前风险、解释证据，还是生成下一步行动计划？"
-			}`))
-		case "/conversation/turn":
-			turnCalls++
-			t.Fatalf("did not expect turn runtime call for clarify intent")
-		default:
+		if !strings.HasPrefix(request.URL.Path, "/agent/sessions/") ||
+			!strings.HasSuffix(request.URL.Path, "/turns") {
 			t.Fatalf("expected conversation runtime path, got %s", request.URL.Path)
 		}
+		sessionTurnCalls++
+		_, _ = response.Write([]byte(`{
+				"session_id": "conversation_project_repo_1001",
+				"conversation_id": "conversation_project_repo_1001",
+				"user_message": "你怎么看",
+				"agent_response": "你想让我评估当前风险、解释证据，还是生成下一步行动计划？",
+				"intent": "clarify",
+				"confidence": 0.35,
+				"evidence_refs": [],
+				"current_node": "clarify_responder",
+				"trace_events": [{"node":"clarify_responder","title":"生成澄清问题"}],
+				"tool_calls": [],
+				"approval_request": null
+			}`))
 	}))
 	defer agentRuntime.Close()
 
@@ -449,8 +496,8 @@ func TestAgentConversationTurnUsesRuntimeIntentBeforeEvidence(t *testing.T) {
 	if err := json.NewDecoder(turnResponse.Body).Decode(&turn); err != nil {
 		t.Fatalf("decode turn response: %v", err)
 	}
-	if intentCalls != 1 || turnCalls != 0 {
-		t.Fatalf("expected one intent call and no turn call, got intent=%d turn=%d", intentCalls, turnCalls)
+	if sessionTurnCalls != 1 {
+		t.Fatalf("expected one session turn call, got %d", sessionTurnCalls)
 	}
 	if turn.Intent != "clarify" {
 		t.Fatalf("expected clarify intent, got %q", turn.Intent)

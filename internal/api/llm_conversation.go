@@ -30,20 +30,35 @@ func (server server) buildAgentConversationReply(
 	riskAssessmentID string,
 	userMessage string,
 ) (string, []string, string, error) {
-	classification := classifyConversationIntent(userMessage)
-
 	if strings.TrimSpace(server.agentRuntimeBaseURL) != "" {
-		runtimeClassification, err := requestAgentRuntimeIntentClassification(
+		reply, evidenceRefs, intent, err := requestAgentRuntimeSessionTurn(
 			ctx,
 			server.agentRuntimeBaseURL,
 			conversationID,
 			riskAssessmentID,
 			userMessage,
+			nil,
 		)
 		if err == nil {
-			classification = runtimeClassification
+			if !intentRequiresEvidence(intent) {
+				return reply, evidenceRefs, intent, nil
+			}
+			bundle, bundleErr := server.store.GetEvidenceBundle(ctx, riskAssessmentID)
+			if bundleErr != nil {
+				return "", nil, "", bundleErr
+			}
+			return requestAgentRuntimeSessionTurn(
+				ctx,
+				server.agentRuntimeBaseURL,
+				conversationID,
+				riskAssessmentID,
+				userMessage,
+				&bundle,
+			)
 		}
 	}
+
+	classification := classifyConversationIntent(userMessage)
 
 	if !classification.RequiresEvidence {
 		return replyWithoutEvidence(classification), nil, classification.Intent, nil
@@ -55,20 +70,9 @@ func (server server) buildAgentConversationReply(
 	}
 	evidenceRefs := evidenceRefsFromSignals(bundle.Signals)
 
-	if strings.TrimSpace(server.agentRuntimeBaseURL) != "" {
-		reply, evidenceRefs, intent, err := requestAgentRuntimeConversationReply(
-			ctx,
-			server.agentRuntimeBaseURL,
-			conversationID,
-			riskAssessmentID,
-			userMessage,
-			bundle,
-		)
-		if err == nil {
-			return reply, evidenceRefs, intent, nil
-		}
+	if classification.Intent == "project_status" {
+		return fallbackProjectStatusReply(bundle), evidenceRefs, "project_status", nil
 	}
-
 	if classification.Intent == "action_plan" {
 		return fallbackActionPlanReply(bundle), evidenceRefs, "action_plan", nil
 	}
@@ -88,106 +92,60 @@ func (server server) buildAgentConversationReply(
 	return reply, evidenceRefs, "risk_explain", nil
 }
 
-func requestAgentRuntimeIntentClassification(
+func requestAgentRuntimeSessionTurn(
 	ctx context.Context,
 	baseURL string,
 	conversationID string,
 	riskAssessmentID string,
 	userMessage string,
-) (conversationIntentClassification, error) {
+	bundle *db.EvidenceBundle,
+) (string, []string, string, error) {
 	payload := map[string]any{
 		"conversation_id":    conversationID,
 		"project_id":         "",
 		"risk_assessment_id": riskAssessmentID,
 		"message":            userMessage,
 	}
+	if bundle != nil {
+		payload["project_id"] = bundle.Assessment.ProjectID
+		payload["evidence_bundle"] = bundle
+	}
 	rawPayload, err := json.Marshal(payload)
 	if err != nil {
-		return conversationIntentClassification{}, fmt.Errorf("marshal agent runtime intent payload: %w", err)
+		return "", nil, "", fmt.Errorf("marshal agent runtime session payload: %w", err)
 	}
 
 	request, err := http.NewRequestWithContext(
 		ctx,
 		http.MethodPost,
-		strings.TrimRight(baseURL, "/")+"/conversation/intent",
+		strings.TrimRight(baseURL, "/")+"/agent/sessions/"+conversationID+"/turns",
 		bytes.NewReader(rawPayload),
 	)
 	if err != nil {
-		return conversationIntentClassification{}, fmt.Errorf("create agent runtime intent request: %w", err)
+		return "", nil, "", fmt.Errorf("create agent runtime session request: %w", err)
 	}
 	request.Header.Set("Accept", "application/json")
 	request.Header.Set("Content-Type", "application/json")
 
 	response, err := llmHTTPClient.Do(request)
 	if err != nil {
-		return conversationIntentClassification{}, fmt.Errorf("call agent runtime intent: %w", err)
+		return "", nil, "", fmt.Errorf("call agent runtime session: %w", err)
 	}
 	defer response.Body.Close()
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return conversationIntentClassification{}, fmt.Errorf("agent runtime intent returned status %d", response.StatusCode)
-	}
-
-	var classification conversationIntentClassification
-	if err := json.NewDecoder(response.Body).Decode(&classification); err != nil {
-		return conversationIntentClassification{}, fmt.Errorf("decode agent runtime intent response: %w", err)
-	}
-	if strings.TrimSpace(classification.Intent) == "" {
-		return conversationIntentClassification{}, fmt.Errorf("agent runtime intent response is incomplete")
-	}
-
-	return classification, nil
-}
-
-func requestAgentRuntimeConversationReply(
-	ctx context.Context,
-	baseURL string,
-	conversationID string,
-	riskAssessmentID string,
-	userMessage string,
-	bundle db.EvidenceBundle,
-) (string, []string, string, error) {
-	payload := map[string]any{
-		"conversation_id":    conversationID,
-		"risk_assessment_id": riskAssessmentID,
-		"message":            userMessage,
-		"evidence_bundle":    bundle,
-	}
-	rawPayload, err := json.Marshal(payload)
-	if err != nil {
-		return "", nil, "", fmt.Errorf("marshal agent runtime payload: %w", err)
-	}
-
-	request, err := http.NewRequestWithContext(
-		ctx,
-		http.MethodPost,
-		strings.TrimRight(baseURL, "/")+"/conversation/turn",
-		bytes.NewReader(rawPayload),
-	)
-	if err != nil {
-		return "", nil, "", fmt.Errorf("create agent runtime request: %w", err)
-	}
-	request.Header.Set("Accept", "application/json")
-	request.Header.Set("Content-Type", "application/json")
-
-	response, err := llmHTTPClient.Do(request)
-	if err != nil {
-		return "", nil, "", fmt.Errorf("call agent runtime: %w", err)
-	}
-	defer response.Body.Close()
-	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return "", nil, "", fmt.Errorf("agent runtime returned status %d", response.StatusCode)
+		return "", nil, "", fmt.Errorf("agent runtime session returned status %d", response.StatusCode)
 	}
 
 	var body struct {
 		AgentResponse string   `json:"agent_response"`
-		EvidenceRefs  []string `json:"evidence_refs"`
 		Intent        string   `json:"intent"`
+		EvidenceRefs  []string `json:"evidence_refs"`
 	}
 	if err := json.NewDecoder(response.Body).Decode(&body); err != nil {
-		return "", nil, "", fmt.Errorf("decode agent runtime response: %w", err)
+		return "", nil, "", fmt.Errorf("decode agent runtime session response: %w", err)
 	}
 	if strings.TrimSpace(body.AgentResponse) == "" || strings.TrimSpace(body.Intent) == "" {
-		return "", nil, "", fmt.Errorf("agent runtime response is incomplete")
+		return "", nil, "", fmt.Errorf("agent runtime session response is incomplete")
 	}
 
 	return strings.TrimSpace(body.AgentResponse), body.EvidenceRefs, strings.TrimSpace(body.Intent), nil
@@ -284,6 +242,20 @@ func fallbackActionPlanReply(bundle db.EvidenceBundle) string {
 	return "行动计划：先确认阻塞证据，再定位失败检查，随后修复并重新运行测试。当前依据：" + reason
 }
 
+func fallbackProjectStatusReply(bundle db.EvidenceBundle) string {
+	reason := "暂无活跃风险信号"
+	if len(bundle.Signals) > 0 {
+		reason = bundle.Signals[0].Reason
+	}
+	return fmt.Sprintf(
+		"当前项目 %s 处于%s状态，风险分 %d。主要阻塞：%s",
+		bundle.Project.Name,
+		formatRiskLevel(bundle.Assessment.Level),
+		bundle.Assessment.Score,
+		reason,
+	)
+}
+
 func selfIntroductionReply() string {
 	return "我是 Dev Time Agent，定位是项目风险驱动助手。我会围绕项目、PR、测试、CI 和交付阻塞来识别风险、解释证据、生成行动计划，并在需要执行工具前请求确认。"
 }
@@ -301,6 +273,15 @@ func replyWithoutEvidence(classification conversationIntentClassification) strin
 		return "你想让我评估当前风险、解释证据，还是生成下一步行动计划？"
 	default:
 		return "你想让我评估当前风险、解释证据，还是生成下一步行动计划？"
+	}
+}
+
+func intentRequiresEvidence(intent string) bool {
+	switch intent {
+	case "project_status", "risk_explain", "evidence_query", "action_plan", "tool_request":
+		return true
+	default:
+		return false
 	}
 }
 
@@ -327,6 +308,15 @@ func classifyConversationIntent(message string) conversationIntentClassification
 			Intent:           "smalltalk",
 			Confidence:       1,
 			RequiresEvidence: false,
+		}
+	}
+	for _, keyword := range []string{"当前状态", "项目状态", "现在状态", "现在怎么样"} {
+		if strings.Contains(normalized, keyword) {
+			return conversationIntentClassification{
+				Intent:           "project_status",
+				Confidence:       0.9,
+				RequiresEvidence: true,
+			}
 		}
 	}
 	for _, keyword := range []string{"介绍", "你是谁", "你能做什么", "自我介绍"} {
@@ -362,4 +352,16 @@ func classifyConversationIntent(message string) conversationIntentClassification
 		RequiresEvidence:   false,
 		ClarifyingQuestion: "你想让我评估当前风险、解释证据，还是生成下一步行动计划？",
 	}
+}
+
+func formatRiskLevel(level string) string {
+	labels := map[string]string{
+		"high":   "高风险",
+		"medium": "中风险",
+		"low":    "低风险",
+	}
+	if label, ok := labels[level]; ok {
+		return label
+	}
+	return level
 }
