@@ -144,6 +144,65 @@ func TestAgentConversationTurnHandlesGreetingWithoutRiskEvidence(t *testing.T) {
 	}
 }
 
+func TestAgentConversationTurnIntroducesItselfWithoutRiskEvidence(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	store := testsupport.NewMigratedStore(t, ctx)
+	router := api.NewRouter(api.Dependencies{Store: store})
+
+	projectID, assessmentID := createProjectRisk(t, router)
+
+	conversationResponse := performJSONRequest(
+		router,
+		http.MethodGet,
+		"/api/projects/"+projectID+"/agent-conversation?risk_assessment_id="+assessmentID,
+		nil,
+	)
+	if conversationResponse.Code != http.StatusOK {
+		t.Fatalf("expected conversation status 200, got %d: %s", conversationResponse.Code, conversationResponse.Body.String())
+	}
+
+	var conversation struct {
+		ID string `json:"id"`
+	}
+	if err := json.NewDecoder(conversationResponse.Body).Decode(&conversation); err != nil {
+		t.Fatalf("decode conversation response: %v", err)
+	}
+
+	turnResponse := performJSONRequest(
+		router,
+		http.MethodPost,
+		"/api/agent-conversations/"+conversation.ID+"/turns",
+		[]byte(`{
+			"message": "介绍你自己",
+			"risk_assessment_id": "`+assessmentID+`"
+		}`),
+	)
+	if turnResponse.Code != http.StatusCreated {
+		t.Fatalf("expected turn status 201, got %d: %s", turnResponse.Code, turnResponse.Body.String())
+	}
+
+	var turn struct {
+		AgentResponse string   `json:"agent_response"`
+		EvidenceRefs  []string `json:"evidence_refs"`
+		Intent        string   `json:"intent"`
+	}
+	if err := json.NewDecoder(turnResponse.Body).Decode(&turn); err != nil {
+		t.Fatalf("decode turn response: %v", err)
+	}
+	if turn.Intent != "self_intro" {
+		t.Fatalf("expected self_intro intent, got %q", turn.Intent)
+	}
+	if !strings.Contains(turn.AgentResponse, "Dev Time Agent") ||
+		!strings.Contains(turn.AgentResponse, "项目风险") {
+		t.Fatalf("expected self introduction response, got %q", turn.AgentResponse)
+	}
+	if len(turn.EvidenceRefs) != 0 {
+		t.Fatalf("expected self intro without risk evidence refs, got %#v", turn.EvidenceRefs)
+	}
+}
+
 func TestAgentConversationTurnUsesConfiguredAgentRuntime(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()

@@ -44,6 +44,9 @@ func (server server) buildAgentConversationReply(
 	if intent == "smalltalk" {
 		return "你好，我是 Dev Time Agent。你可以让我解释当前风险、查看证据，或生成下一步行动计划。", nil, "smalltalk", nil
 	}
+	if intent == "self_intro" {
+		return selfIntroductionReply(), nil, "self_intro", nil
+	}
 
 	evidenceRefs := evidenceRefsFromSignals(bundle.Signals)
 	if intent == "action_plan" {
@@ -211,6 +214,10 @@ func fallbackActionPlanReply(bundle db.EvidenceBundle) string {
 	return "行动计划：先确认阻塞证据，再定位失败检查，随后修复并重新运行测试。当前依据：" + reason
 }
 
+func selfIntroductionReply() string {
+	return "我是 Dev Time Agent，定位是项目风险驱动助手。我会围绕项目、PR、测试、CI 和交付阻塞来识别风险、解释证据、生成行动计划，并在需要执行工具前请求确认。"
+}
+
 func evidenceRefsFromSignals(signals []db.RiskSignal) []string {
 	refs := []string{}
 	seen := map[string]bool{}
@@ -231,6 +238,11 @@ func classifyConversationIntent(message string) string {
 	switch normalized {
 	case "你好", "您好", "hi", "hello", "hey":
 		return "smalltalk"
+	}
+	for _, keyword := range []string{"介绍", "你是谁", "你能做什么", "自我介绍"} {
+		if strings.Contains(normalized, keyword) {
+			return "self_intro"
+		}
 	}
 	for _, keyword := range []string{"行动", "计划", "下一步", "怎么做"} {
 		if strings.Contains(normalized, keyword) {
