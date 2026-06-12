@@ -903,6 +903,9 @@ func (store *Store) AddAgentConversationTurn(
 	evidenceRefs []string,
 	intent string,
 ) (AgentConversationTurn, error) {
+	if evidenceRefs == nil {
+		evidenceRefs = []string{}
+	}
 	rawEvidenceRefs, err := json.Marshal(evidenceRefs)
 	if err != nil {
 		return AgentConversationTurn{}, fmt.Errorf("marshal turn evidence refs: %w", err)

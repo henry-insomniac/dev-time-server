@@ -15,16 +15,45 @@ import (
 
 var llmHTTPClient = &http.Client{Timeout: 30 * time.Second}
 
+type conversationIntentClassification struct {
+	Intent             string  `json:"intent"`
+	Confidence         float64 `json:"confidence"`
+	RequiresEvidence   bool    `json:"requires_evidence"`
+	RequiresTool       bool    `json:"requires_tool"`
+	RequiresApproval   bool    `json:"requires_approval"`
+	ClarifyingQuestion string  `json:"clarifying_question"`
+}
+
 func (server server) buildAgentConversationReply(
 	ctx context.Context,
 	conversationID string,
 	riskAssessmentID string,
 	userMessage string,
 ) (string, []string, string, error) {
+	classification := classifyConversationIntent(userMessage)
+
+	if strings.TrimSpace(server.agentRuntimeBaseURL) != "" {
+		runtimeClassification, err := requestAgentRuntimeIntentClassification(
+			ctx,
+			server.agentRuntimeBaseURL,
+			conversationID,
+			riskAssessmentID,
+			userMessage,
+		)
+		if err == nil {
+			classification = runtimeClassification
+		}
+	}
+
+	if !classification.RequiresEvidence {
+		return replyWithoutEvidence(classification), nil, classification.Intent, nil
+	}
+
 	bundle, err := server.store.GetEvidenceBundle(ctx, riskAssessmentID)
 	if err != nil {
 		return "", nil, "", err
 	}
+	evidenceRefs := evidenceRefsFromSignals(bundle.Signals)
 
 	if strings.TrimSpace(server.agentRuntimeBaseURL) != "" {
 		reply, evidenceRefs, intent, err := requestAgentRuntimeConversationReply(
@@ -40,16 +69,7 @@ func (server server) buildAgentConversationReply(
 		}
 	}
 
-	intent := classifyConversationIntent(userMessage)
-	if intent == "smalltalk" {
-		return "你好，我是 Dev Time Agent。你可以让我解释当前风险、查看证据，或生成下一步行动计划。", nil, "smalltalk", nil
-	}
-	if intent == "self_intro" {
-		return selfIntroductionReply(), nil, "self_intro", nil
-	}
-
-	evidenceRefs := evidenceRefsFromSignals(bundle.Signals)
-	if intent == "action_plan" {
+	if classification.Intent == "action_plan" {
 		return fallbackActionPlanReply(bundle), evidenceRefs, "action_plan", nil
 	}
 
@@ -66,6 +86,56 @@ func (server server) buildAgentConversationReply(
 		return "", nil, "", err
 	}
 	return reply, evidenceRefs, "risk_explain", nil
+}
+
+func requestAgentRuntimeIntentClassification(
+	ctx context.Context,
+	baseURL string,
+	conversationID string,
+	riskAssessmentID string,
+	userMessage string,
+) (conversationIntentClassification, error) {
+	payload := map[string]any{
+		"conversation_id":    conversationID,
+		"project_id":         "",
+		"risk_assessment_id": riskAssessmentID,
+		"message":            userMessage,
+	}
+	rawPayload, err := json.Marshal(payload)
+	if err != nil {
+		return conversationIntentClassification{}, fmt.Errorf("marshal agent runtime intent payload: %w", err)
+	}
+
+	request, err := http.NewRequestWithContext(
+		ctx,
+		http.MethodPost,
+		strings.TrimRight(baseURL, "/")+"/conversation/intent",
+		bytes.NewReader(rawPayload),
+	)
+	if err != nil {
+		return conversationIntentClassification{}, fmt.Errorf("create agent runtime intent request: %w", err)
+	}
+	request.Header.Set("Accept", "application/json")
+	request.Header.Set("Content-Type", "application/json")
+
+	response, err := llmHTTPClient.Do(request)
+	if err != nil {
+		return conversationIntentClassification{}, fmt.Errorf("call agent runtime intent: %w", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		return conversationIntentClassification{}, fmt.Errorf("agent runtime intent returned status %d", response.StatusCode)
+	}
+
+	var classification conversationIntentClassification
+	if err := json.NewDecoder(response.Body).Decode(&classification); err != nil {
+		return conversationIntentClassification{}, fmt.Errorf("decode agent runtime intent response: %w", err)
+	}
+	if strings.TrimSpace(classification.Intent) == "" {
+		return conversationIntentClassification{}, fmt.Errorf("agent runtime intent response is incomplete")
+	}
+
+	return classification, nil
 }
 
 func requestAgentRuntimeConversationReply(
@@ -218,6 +288,22 @@ func selfIntroductionReply() string {
 	return "我是 Dev Time Agent，定位是项目风险驱动助手。我会围绕项目、PR、测试、CI 和交付阻塞来识别风险、解释证据、生成行动计划，并在需要执行工具前请求确认。"
 }
 
+func replyWithoutEvidence(classification conversationIntentClassification) string {
+	switch classification.Intent {
+	case "smalltalk":
+		return "你好，我是 Dev Time Agent。你可以让我解释当前风险、查看证据，或生成下一步行动计划。"
+	case "self_intro":
+		return selfIntroductionReply()
+	case "clarify":
+		if strings.TrimSpace(classification.ClarifyingQuestion) != "" {
+			return classification.ClarifyingQuestion
+		}
+		return "你想让我评估当前风险、解释证据，还是生成下一步行动计划？"
+	default:
+		return "你想让我评估当前风险、解释证据，还是生成下一步行动计划？"
+	}
+}
+
 func evidenceRefsFromSignals(signals []db.RiskSignal) []string {
 	refs := []string{}
 	seen := map[string]bool{}
@@ -233,21 +319,47 @@ func evidenceRefsFromSignals(signals []db.RiskSignal) []string {
 	return refs
 }
 
-func classifyConversationIntent(message string) string {
+func classifyConversationIntent(message string) conversationIntentClassification {
 	normalized := strings.TrimSpace(strings.ToLower(message))
 	switch normalized {
 	case "你好", "您好", "hi", "hello", "hey":
-		return "smalltalk"
+		return conversationIntentClassification{
+			Intent:           "smalltalk",
+			Confidence:       1,
+			RequiresEvidence: false,
+		}
 	}
 	for _, keyword := range []string{"介绍", "你是谁", "你能做什么", "自我介绍"} {
 		if strings.Contains(normalized, keyword) {
-			return "self_intro"
+			return conversationIntentClassification{
+				Intent:           "self_intro",
+				Confidence:       0.95,
+				RequiresEvidence: false,
+			}
 		}
 	}
 	for _, keyword := range []string{"行动", "计划", "下一步", "怎么做"} {
 		if strings.Contains(normalized, keyword) {
-			return "action_plan"
+			return conversationIntentClassification{
+				Intent:           "action_plan",
+				Confidence:       0.9,
+				RequiresEvidence: true,
+			}
 		}
 	}
-	return "risk_explain"
+	for _, keyword := range []string{"风险", "证据", "为什么", "高风险", "阻塞", "测试", "ci", "pr"} {
+		if strings.Contains(normalized, keyword) {
+			return conversationIntentClassification{
+				Intent:           "risk_explain",
+				Confidence:       0.9,
+				RequiresEvidence: true,
+			}
+		}
+	}
+	return conversationIntentClassification{
+		Intent:             "clarify",
+		Confidence:         0.35,
+		RequiresEvidence:   false,
+		ClarifyingQuestion: "你想让我评估当前风险、解释证据，还是生成下一步行动计划？",
+	}
 }
