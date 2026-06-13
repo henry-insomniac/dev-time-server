@@ -24,14 +24,23 @@ type conversationIntentClassification struct {
 	ClarifyingQuestion string  `json:"clarifying_question"`
 }
 
+type agentConversationReply struct {
+	AgentResponse   string
+	EvidenceRefs    []string
+	Intent          string
+	ToolCalls       []map[string]any
+	ApprovalRequest map[string]any
+	ReasoningTrace  []db.ReasoningTraceStep
+}
+
 func (server server) buildAgentConversationReply(
 	ctx context.Context,
 	conversationID string,
 	riskAssessmentID string,
 	userMessage string,
-) (string, []string, string, error) {
+) (agentConversationReply, error) {
 	if strings.TrimSpace(server.agentRuntimeBaseURL) != "" {
-		reply, evidenceRefs, intent, err := requestAgentRuntimeSessionTurn(
+		reply, err := requestAgentRuntimeSessionTurn(
 			ctx,
 			server.agentRuntimeBaseURL,
 			conversationID,
@@ -40,12 +49,12 @@ func (server server) buildAgentConversationReply(
 			nil,
 		)
 		if err == nil {
-			if !intentRequiresEvidence(intent) || len(evidenceRefs) > 0 {
-				return reply, evidenceRefs, intent, nil
+			if !intentRequiresEvidence(reply.Intent) || len(reply.EvidenceRefs) > 0 {
+				return reply, nil
 			}
 			bundle, bundleErr := server.store.GetEvidenceBundle(ctx, riskAssessmentID)
 			if bundleErr != nil {
-				return "", nil, "", bundleErr
+				return agentConversationReply{}, bundleErr
 			}
 			return requestAgentRuntimeSessionTurn(
 				ctx,
@@ -61,35 +70,54 @@ func (server server) buildAgentConversationReply(
 	classification := classifyConversationIntent(userMessage)
 
 	if !classification.RequiresEvidence {
-		return replyWithoutEvidence(classification), nil, classification.Intent, nil
+		return agentConversationReply{
+			AgentResponse: replyWithoutEvidence(classification),
+			Intent:        classification.Intent,
+		}, nil
 	}
 
 	bundle, err := server.store.GetEvidenceBundle(ctx, riskAssessmentID)
 	if err != nil {
-		return "", nil, "", err
+		return agentConversationReply{}, err
 	}
 	evidenceRefs := evidenceRefsFromSignals(bundle.Signals)
 
 	if classification.Intent == "project_status" {
-		return fallbackProjectStatusReply(bundle), evidenceRefs, "project_status", nil
+		return agentConversationReply{
+			AgentResponse: fallbackProjectStatusReply(bundle),
+			EvidenceRefs:  evidenceRefs,
+			Intent:        "project_status",
+		}, nil
 	}
 	if classification.Intent == "action_plan" {
-		return fallbackActionPlanReply(bundle), evidenceRefs, "action_plan", nil
+		return agentConversationReply{
+			AgentResponse: fallbackActionPlanReply(bundle),
+			EvidenceRefs:  evidenceRefs,
+			Intent:        "action_plan",
+		}, nil
 	}
 
 	config, err := server.store.GetActiveLLMProviderConfig(ctx)
 	if errors.Is(err, db.ErrNotFound) {
-		return fallbackAgentConversationReply(bundle), evidenceRefs, "risk_explain", nil
+		return agentConversationReply{
+			AgentResponse: fallbackAgentConversationReply(bundle),
+			EvidenceRefs:  evidenceRefs,
+			Intent:        "risk_explain",
+		}, nil
 	}
 	if err != nil {
-		return "", nil, "", err
+		return agentConversationReply{}, err
 	}
 
 	reply, err := requestLLMConversationReply(ctx, config, bundle, userMessage)
 	if err != nil {
-		return "", nil, "", err
+		return agentConversationReply{}, err
 	}
-	return reply, evidenceRefs, "risk_explain", nil
+	return agentConversationReply{
+		AgentResponse: reply,
+		EvidenceRefs:  evidenceRefs,
+		Intent:        "risk_explain",
+	}, nil
 }
 
 func requestAgentRuntimeSessionTurn(
@@ -99,7 +127,7 @@ func requestAgentRuntimeSessionTurn(
 	riskAssessmentID string,
 	userMessage string,
 	bundle *db.EvidenceBundle,
-) (string, []string, string, error) {
+) (agentConversationReply, error) {
 	payload := map[string]any{
 		"conversation_id":    conversationID,
 		"project_id":         "",
@@ -112,7 +140,7 @@ func requestAgentRuntimeSessionTurn(
 	}
 	rawPayload, err := json.Marshal(payload)
 	if err != nil {
-		return "", nil, "", fmt.Errorf("marshal agent runtime session payload: %w", err)
+		return agentConversationReply{}, fmt.Errorf("marshal agent runtime session payload: %w", err)
 	}
 
 	request, err := http.NewRequestWithContext(
@@ -122,33 +150,43 @@ func requestAgentRuntimeSessionTurn(
 		bytes.NewReader(rawPayload),
 	)
 	if err != nil {
-		return "", nil, "", fmt.Errorf("create agent runtime session request: %w", err)
+		return agentConversationReply{}, fmt.Errorf("create agent runtime session request: %w", err)
 	}
 	request.Header.Set("Accept", "application/json")
 	request.Header.Set("Content-Type", "application/json")
 
 	response, err := llmHTTPClient.Do(request)
 	if err != nil {
-		return "", nil, "", fmt.Errorf("call agent runtime session: %w", err)
+		return agentConversationReply{}, fmt.Errorf("call agent runtime session: %w", err)
 	}
 	defer response.Body.Close()
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return "", nil, "", fmt.Errorf("agent runtime session returned status %d", response.StatusCode)
+		return agentConversationReply{}, fmt.Errorf("agent runtime session returned status %d", response.StatusCode)
 	}
 
 	var body struct {
-		AgentResponse string   `json:"agent_response"`
-		Intent        string   `json:"intent"`
-		EvidenceRefs  []string `json:"evidence_refs"`
+		AgentResponse   string                  `json:"agent_response"`
+		Intent          string                  `json:"intent"`
+		EvidenceRefs    []string                `json:"evidence_refs"`
+		ToolCalls       []map[string]any        `json:"tool_calls"`
+		ApprovalRequest map[string]any          `json:"approval_request"`
+		ReasoningTrace  []db.ReasoningTraceStep `json:"reasoning_trace"`
 	}
 	if err := json.NewDecoder(response.Body).Decode(&body); err != nil {
-		return "", nil, "", fmt.Errorf("decode agent runtime session response: %w", err)
+		return agentConversationReply{}, fmt.Errorf("decode agent runtime session response: %w", err)
 	}
 	if strings.TrimSpace(body.AgentResponse) == "" || strings.TrimSpace(body.Intent) == "" {
-		return "", nil, "", fmt.Errorf("agent runtime session response is incomplete")
+		return agentConversationReply{}, fmt.Errorf("agent runtime session response is incomplete")
 	}
 
-	return strings.TrimSpace(body.AgentResponse), body.EvidenceRefs, strings.TrimSpace(body.Intent), nil
+	return agentConversationReply{
+		AgentResponse:   strings.TrimSpace(body.AgentResponse),
+		EvidenceRefs:    body.EvidenceRefs,
+		Intent:          strings.TrimSpace(body.Intent),
+		ToolCalls:       body.ToolCalls,
+		ApprovalRequest: body.ApprovalRequest,
+		ReasoningTrace:  body.ReasoningTrace,
+	}, nil
 }
 
 func requestLLMConversationReply(

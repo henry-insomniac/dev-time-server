@@ -141,6 +141,18 @@ Dev Time 跨端技术架构。定义 GitHub 事实源、事件流、风险引擎
 - GitHub 写入默认生成草稿并等待用户确认，不在 MVP 中自动执行。
 - 架构变更必须同步更新本文件。
 
+## Agent Conversation 响应契约
+
+`POST /api/agent-conversations/{conversationID}/turns` 会优先调用 `dev-time-agent` session runtime。当前响应和持久化字段包括：
+
+- `agent_response`：最终给用户看的中文回复。
+- `evidence_refs`：本轮回答引用的证据。
+- `intent`：Agent 识别出的意图。
+- `trace_events`：server 持久化的审计事件，由 `reasoning_trace` 转换而来；无 reasoning trace 时保留兼容 synthetic trace。
+- `reasoning_trace`：前端可折叠展示的可审计思考过程。
+- `tool_calls`：runtime 实际执行的工具调用摘要。
+- `approval_request`：写操作草稿的用户确认请求；确认前 server 不执行外部写入。
+
 ## 架构变更记录
 
 | 日期 | 变更 | 原因 | 验证 |
@@ -164,3 +176,4 @@ Dev Time 跨端技术架构。定义 GitHub 事实源、事件流、风险引擎
 | 2026-06-11 | 增加项目 ActionSuggestion 列表 API | 前端可读取并确认当前项目的行动草稿 | `go test ./...` |
 | 2026-06-11 | 扩展 EvidenceBundle 相关事件 | Agent 可同时获取失败 check_run 和同仓库 pull_request 事件，用于 PR Doctor 草稿生成 | `go test ./...` |
 | 2026-06-11 | 增加 AgentRun / AgentStep 调查时间线 | AgentJob 生命周期可沉淀为可读的 Agent 主导风险调查过程 | `go test ./...` |
+| 2026-06-13 | 透传并保存 Agent reasoning trace | 前端需要按 turn 展示默认折叠的思考过程，同时保留工具调用和审批请求审计 | `go test ./...` |

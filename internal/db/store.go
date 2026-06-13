@@ -143,13 +143,26 @@ type AgentConversation struct {
 }
 
 type AgentConversationTurn struct {
-	ID             string            `json:"id"`
-	ConversationID string            `json:"conversation_id"`
-	UserMessage    string            `json:"user_message"`
-	AgentResponse  string            `json:"agent_response"`
-	EvidenceRefs   []string          `json:"evidence_refs"`
-	Intent         string            `json:"intent"`
-	TraceEvents    []AgentTraceEvent `json:"trace_events"`
+	ID              string               `json:"id"`
+	ConversationID  string               `json:"conversation_id"`
+	UserMessage     string               `json:"user_message"`
+	AgentResponse   string               `json:"agent_response"`
+	EvidenceRefs    []string             `json:"evidence_refs"`
+	Intent          string               `json:"intent"`
+	TraceEvents     []AgentTraceEvent    `json:"trace_events"`
+	ToolCalls       []map[string]any     `json:"tool_calls"`
+	ApprovalRequest map[string]any       `json:"approval_request,omitempty"`
+	ReasoningTrace  []ReasoningTraceStep `json:"reasoning_trace"`
+}
+
+type ReasoningTraceStep struct {
+	Stage        string         `json:"stage"`
+	Title        string         `json:"title"`
+	Summary      string         `json:"summary"`
+	Status       string         `json:"status"`
+	Confidence   *float64       `json:"confidence"`
+	EvidenceRefs []string       `json:"evidence_refs"`
+	ToolCall     map[string]any `json:"tool_call"`
 }
 
 type AgentTraceEvent struct {
@@ -902,32 +915,49 @@ func (store *Store) AddAgentConversationTurn(
 	agentResponse string,
 	evidenceRefs []string,
 	intent string,
+	toolCalls []map[string]any,
+	approvalRequest map[string]any,
+	reasoningTrace []ReasoningTraceStep,
 ) (AgentConversationTurn, error) {
 	if evidenceRefs == nil {
 		evidenceRefs = []string{}
+	}
+	if toolCalls == nil {
+		toolCalls = []map[string]any{}
+	}
+	if reasoningTrace == nil {
+		reasoningTrace = []ReasoningTraceStep{}
 	}
 	rawEvidenceRefs, err := json.Marshal(evidenceRefs)
 	if err != nil {
 		return AgentConversationTurn{}, fmt.Errorf("marshal turn evidence refs: %w", err)
 	}
+	rawToolCalls, err := json.Marshal(toolCalls)
+	if err != nil {
+		return AgentConversationTurn{}, fmt.Errorf("marshal turn tool calls: %w", err)
+	}
+	rawApprovalRequest, err := json.Marshal(approvalRequest)
+	if err != nil {
+		return AgentConversationTurn{}, fmt.Errorf("marshal turn approval request: %w", err)
+	}
+	if approvalRequest == nil {
+		rawApprovalRequest = nil
+	}
+	rawReasoningTrace, err := json.Marshal(reasoningTrace)
+	if err != nil {
+		return AgentConversationTurn{}, fmt.Errorf("marshal turn reasoning trace: %w", err)
+	}
 
 	turn := AgentConversationTurn{
-		ID:             fmt.Sprintf("turn_%d", time.Now().UTC().UnixNano()),
-		ConversationID: conversationID,
-		UserMessage:    userMessage,
-		AgentResponse:  agentResponse,
-		EvidenceRefs:   evidenceRefs,
-		Intent:         intent,
-	}
-	traceEvent := AgentTraceEvent{
-		ID:             "trace_" + turn.ID,
-		ConversationID: conversationID,
-		TurnID:         turn.ID,
-		EventType:      "intent_routed",
-		Title:          "完成意图识别",
-		Body:           "Agent 已根据用户输入选择处理路径。",
-		Intent:         intent,
-		EvidenceRefs:   evidenceRefs,
+		ID:              fmt.Sprintf("turn_%d", time.Now().UTC().UnixNano()),
+		ConversationID:  conversationID,
+		UserMessage:     userMessage,
+		AgentResponse:   agentResponse,
+		EvidenceRefs:    evidenceRefs,
+		Intent:          intent,
+		ToolCalls:       toolCalls,
+		ApprovalRequest: approvalRequest,
+		ReasoningTrace:  reasoningTrace,
 	}
 
 	if _, err := store.pool.Exec(
@@ -940,9 +970,12 @@ func (store *Store) AddAgentConversationTurn(
 			user_message,
 			agent_response,
 			evidence_refs,
-			intent
+			intent,
+			tool_calls,
+			approval_request,
+			reasoning_trace
 		)
-		VALUES ($1, $2, 'agent', $3, $4, $5, $6)
+		VALUES ($1, $2, 'agent', $3, $4, $5, $6, $7, $8, $9)
 		`,
 		turn.ID,
 		turn.ConversationID,
@@ -950,42 +983,85 @@ func (store *Store) AddAgentConversationTurn(
 		turn.AgentResponse,
 		rawEvidenceRefs,
 		turn.Intent,
+		rawToolCalls,
+		rawApprovalRequest,
+		rawReasoningTrace,
 	); err != nil {
 		return AgentConversationTurn{}, fmt.Errorf("insert agent conversation turn: %w", err)
 	}
-	rawTraceEvidenceRefs, err := json.Marshal(traceEvent.EvidenceRefs)
-	if err != nil {
-		return AgentConversationTurn{}, fmt.Errorf("marshal trace evidence refs: %w", err)
+
+	traceEvents := traceEventsFromReasoningTrace(turn, reasoningTrace)
+	if len(traceEvents) == 0 {
+		traceEvents = []AgentTraceEvent{syntheticIntentTraceEvent(turn)}
 	}
-	if _, err := store.pool.Exec(
-		ctx,
-		`
-		INSERT INTO agent_trace_events (
-			id,
-			conversation_id,
-			turn_id,
-			event_type,
-			title,
-			body,
-			intent,
-			evidence_refs
-		)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-		`,
-		traceEvent.ID,
-		traceEvent.ConversationID,
-		traceEvent.TurnID,
-		traceEvent.EventType,
-		traceEvent.Title,
-		traceEvent.Body,
-		traceEvent.Intent,
-		rawTraceEvidenceRefs,
-	); err != nil {
-		return AgentConversationTurn{}, fmt.Errorf("insert agent trace event: %w", err)
+	for _, traceEvent := range traceEvents {
+		rawTraceEvidenceRefs, err := json.Marshal(traceEvent.EvidenceRefs)
+		if err != nil {
+			return AgentConversationTurn{}, fmt.Errorf("marshal trace evidence refs: %w", err)
+		}
+		if _, err := store.pool.Exec(
+			ctx,
+			`
+			INSERT INTO agent_trace_events (
+				id,
+				conversation_id,
+				turn_id,
+				event_type,
+				title,
+				body,
+				intent,
+				evidence_refs
+			)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+			`,
+			traceEvent.ID,
+			traceEvent.ConversationID,
+			traceEvent.TurnID,
+			traceEvent.EventType,
+			traceEvent.Title,
+			traceEvent.Body,
+			traceEvent.Intent,
+			rawTraceEvidenceRefs,
+		); err != nil {
+			return AgentConversationTurn{}, fmt.Errorf("insert agent trace event: %w", err)
+		}
 	}
 
-	turn.TraceEvents = []AgentTraceEvent{traceEvent}
+	turn.TraceEvents = traceEvents
 	return turn, nil
+}
+
+func traceEventsFromReasoningTrace(
+	turn AgentConversationTurn,
+	reasoningTrace []ReasoningTraceStep,
+) []AgentTraceEvent {
+	traceEvents := make([]AgentTraceEvent, 0, len(reasoningTrace))
+	for index, step := range reasoningTrace {
+		traceEvents = append(traceEvents, AgentTraceEvent{
+			ID:             fmt.Sprintf("trace_%s_%02d", turn.ID, index+1),
+			ConversationID: turn.ConversationID,
+			TurnID:         turn.ID,
+			EventType:      step.Stage,
+			Title:          step.Title,
+			Body:           step.Summary,
+			Intent:         turn.Intent,
+			EvidenceRefs:   step.EvidenceRefs,
+		})
+	}
+	return traceEvents
+}
+
+func syntheticIntentTraceEvent(turn AgentConversationTurn) AgentTraceEvent {
+	return AgentTraceEvent{
+		ID:             "trace_" + turn.ID,
+		ConversationID: turn.ConversationID,
+		TurnID:         turn.ID,
+		EventType:      "intent_routed",
+		Title:          "完成意图识别",
+		Body:           "Agent 已根据用户输入选择处理路径。",
+		Intent:         turn.Intent,
+		EvidenceRefs:   turn.EvidenceRefs,
+	}
 }
 
 func conversationEvidenceRefs(signals []RiskSignal) []string {

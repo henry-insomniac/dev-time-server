@@ -558,7 +558,7 @@ func (server server) handleAgentConversationTurn(response http.ResponseWriter, r
 		return
 	}
 
-	agentResponse, evidenceRefs, intent, err := server.buildAgentConversationReply(
+	agentReply, err := server.buildAgentConversationReply(
 		request.Context(),
 		conversationID,
 		input.RiskAssessmentID,
@@ -575,9 +575,12 @@ func (server server) handleAgentConversationTurn(response http.ResponseWriter, r
 		request.Context(),
 		conversationID,
 		input.Message,
-		agentResponse,
-		evidenceRefs,
-		intent,
+		agentReply.AgentResponse,
+		agentReply.EvidenceRefs,
+		agentReply.Intent,
+		agentReply.ToolCalls,
+		agentReply.ApprovalRequest,
+		agentReply.ReasoningTrace,
 	)
 	if err != nil {
 		writeJSON(response, http.StatusInternalServerError, map[string]string{

@@ -427,6 +427,140 @@ func TestAgentConversationTurnUsesConfiguredAgentRuntime(t *testing.T) {
 	}
 }
 
+func TestAgentConversationTurnReturnsRuntimeReasoningTrace(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	agentRuntime := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		response.Header().Set("Content-Type", "application/json")
+		_, _ = response.Write([]byte(`{
+			"session_id": "conversation_project_repo_1001",
+			"conversation_id": "conversation_project_repo_1001",
+			"user_message": "基于当前风险生成 PR 评论草稿",
+			"agent_response": "已生成 PR 评论草稿，请确认后发布。",
+			"intent": "draft_pr_comment",
+			"confidence": 0.91,
+			"evidence_refs": ["event_check-run-conversation-1"],
+			"current_node": "response_verifier",
+			"trace_events": [{"node":"approval_gate","title":"等待用户确认写操作"}],
+			"tool_calls": [
+				{
+					"name": "risk_evidence.read",
+					"status": "succeeded",
+					"input": {"risk_assessment_id": "risk_123"},
+					"evidence_refs": ["event_check-run-conversation-1"]
+				}
+			],
+			"approval_request": {
+				"status": "pending",
+				"reason": "LLM 生成了需要用户确认的写操作。",
+				"actions": [
+					{
+						"action_type": "pr_comment",
+						"target_ref": "pull_request:18",
+						"draft_body": "go test 失败阻塞交付，请先修复后再合并。",
+						"evidence_refs": ["event_check-run-conversation-1"],
+						"required_permission": "pull_request:write"
+					}
+				]
+			},
+			"reasoning_trace": [
+				{
+					"stage": "planning",
+					"title": "识别用户意图",
+					"summary": "用户要求生成 PR 评论草稿。",
+					"status": "completed",
+					"confidence": 0.91,
+					"evidence_refs": [],
+					"tool_call": null
+				},
+				{
+					"stage": "approval",
+					"title": "等待用户确认写操作",
+					"summary": "写操作不会自动执行。",
+					"status": "completed",
+					"confidence": null,
+					"evidence_refs": ["event_check-run-conversation-1"],
+					"tool_call": null
+				}
+			]
+		}`))
+	}))
+	defer agentRuntime.Close()
+
+	store := testsupport.NewMigratedStore(t, ctx)
+	router := api.NewRouter(api.Dependencies{
+		Store:               store,
+		AgentRuntimeBaseURL: agentRuntime.URL,
+	})
+
+	projectID, assessmentID := createProjectRisk(t, router)
+	conversationResponse := performJSONRequest(
+		router,
+		http.MethodGet,
+		"/api/projects/"+projectID+"/agent-conversation?risk_assessment_id="+assessmentID,
+		nil,
+	)
+	var conversation struct {
+		ID string `json:"id"`
+	}
+	if err := json.NewDecoder(conversationResponse.Body).Decode(&conversation); err != nil {
+		t.Fatalf("decode conversation response: %v", err)
+	}
+
+	turnResponse := performJSONRequest(
+		router,
+		http.MethodPost,
+		"/api/agent-conversations/"+conversation.ID+"/turns",
+		[]byte(`{
+			"message": "基于当前风险生成 PR 评论草稿",
+			"risk_assessment_id": "`+assessmentID+`"
+		}`),
+	)
+	if turnResponse.Code != http.StatusCreated {
+		t.Fatalf("expected turn status 201, got %d: %s", turnResponse.Code, turnResponse.Body.String())
+	}
+
+	var turn struct {
+		ReasoningTrace []struct {
+			Stage        string   `json:"stage"`
+			Title        string   `json:"title"`
+			Summary      string   `json:"summary"`
+			EvidenceRefs []string `json:"evidence_refs"`
+		} `json:"reasoning_trace"`
+		ToolCalls []struct {
+			Name         string   `json:"name"`
+			Status       string   `json:"status"`
+			EvidenceRefs []string `json:"evidence_refs"`
+		} `json:"tool_calls"`
+		ApprovalRequest struct {
+			Status  string `json:"status"`
+			Actions []struct {
+				ActionType string `json:"action_type"`
+				TargetRef  string `json:"target_ref"`
+			} `json:"actions"`
+		} `json:"approval_request"`
+	}
+	if err := json.NewDecoder(turnResponse.Body).Decode(&turn); err != nil {
+		t.Fatalf("decode turn response: %v", err)
+	}
+	if len(turn.ReasoningTrace) != 2 {
+		t.Fatalf("expected runtime reasoning trace, got %#v", turn.ReasoningTrace)
+	}
+	if turn.ReasoningTrace[0].Stage != "planning" ||
+		turn.ReasoningTrace[0].Title != "识别用户意图" {
+		t.Fatalf("expected planning reasoning step, got %#v", turn.ReasoningTrace[0])
+	}
+	if len(turn.ToolCalls) != 1 || turn.ToolCalls[0].Name != "risk_evidence.read" {
+		t.Fatalf("expected runtime tool call, got %#v", turn.ToolCalls)
+	}
+	if turn.ApprovalRequest.Status != "pending" ||
+		len(turn.ApprovalRequest.Actions) != 1 ||
+		turn.ApprovalRequest.Actions[0].TargetRef != "pull_request:18" {
+		t.Fatalf("expected pending approval request, got %#v", turn.ApprovalRequest)
+	}
+}
+
 func TestAgentConversationTurnUsesRuntimeIntentBeforeEvidence(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
