@@ -40,7 +40,7 @@ func (server server) buildAgentConversationReply(
 			nil,
 		)
 		if err == nil {
-			if !intentRequiresEvidence(intent) {
+			if !intentRequiresEvidence(intent) || len(evidenceRefs) > 0 {
 				return reply, evidenceRefs, intent, nil
 			}
 			bundle, bundleErr := server.store.GetEvidenceBundle(ctx, riskAssessmentID)

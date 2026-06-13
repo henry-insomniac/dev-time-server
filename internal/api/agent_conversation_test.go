@@ -404,8 +404,8 @@ func TestAgentConversationTurnUsesConfiguredAgentRuntime(t *testing.T) {
 	if runtimeRequest.ConversationID != conversation.ID {
 		t.Fatalf("expected runtime conversation id %q, got %q", conversation.ID, runtimeRequest.ConversationID)
 	}
-	if sessionTurnCalls != 2 {
-		t.Fatalf("expected two session turn calls, got %d", sessionTurnCalls)
+	if sessionTurnCalls != 1 {
+		t.Fatalf("expected one session turn call when runtime returns evidence refs, got %d", sessionTurnCalls)
 	}
 	if runtimeRequest.RiskAssessmentID != assessmentID {
 		t.Fatalf("expected runtime risk assessment id %q, got %q", assessmentID, runtimeRequest.RiskAssessmentID)
@@ -413,8 +413,8 @@ func TestAgentConversationTurnUsesConfiguredAgentRuntime(t *testing.T) {
 	if runtimeRequest.Message != "给我下一步行动计划" {
 		t.Fatalf("expected runtime message, got %q", runtimeRequest.Message)
 	}
-	if !strings.Contains(string(runtimeRequest.EvidenceBundle), "event_check-run-conversation-1") {
-		t.Fatalf("expected runtime evidence bundle, got %s", string(runtimeRequest.EvidenceBundle))
+	if len(runtimeRequest.EvidenceBundle) != 0 {
+		t.Fatalf("expected no server-provided evidence bundle after runtime tool response, got %s", string(runtimeRequest.EvidenceBundle))
 	}
 	if turn.AgentResponse != "Agent Runtime 已识别为行动规划请求。" {
 		t.Fatalf("expected runtime response, got %q", turn.AgentResponse)
