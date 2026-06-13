@@ -908,6 +908,21 @@ func (store *Store) GetOrCreateAgentConversation(
 	return conversation, nil
 }
 
+func (store *Store) ProjectIDForRiskAssessment(
+	ctx context.Context,
+	riskAssessmentID string,
+) (string, error) {
+	var projectID string
+	if err := store.pool.QueryRow(
+		ctx,
+		`SELECT project_id FROM risk_assessments WHERE id = $1`,
+		riskAssessmentID,
+	).Scan(&projectID); err != nil {
+		return "", fmt.Errorf("load project id for risk assessment: %w", err)
+	}
+	return projectID, nil
+}
+
 func (store *Store) AddAgentConversationTurn(
 	ctx context.Context,
 	conversationID string,

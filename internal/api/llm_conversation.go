@@ -40,10 +40,15 @@ func (server server) buildAgentConversationReply(
 	userMessage string,
 ) (agentConversationReply, error) {
 	if strings.TrimSpace(server.agentRuntimeBaseURL) != "" {
+		projectID, _ := server.store.ProjectIDForRiskAssessment(
+			ctx,
+			riskAssessmentID,
+		)
 		reply, err := requestAgentRuntimeSessionTurn(
 			ctx,
 			server.agentRuntimeBaseURL,
 			conversationID,
+			projectID,
 			riskAssessmentID,
 			userMessage,
 			nil,
@@ -60,6 +65,7 @@ func (server server) buildAgentConversationReply(
 				ctx,
 				server.agentRuntimeBaseURL,
 				conversationID,
+				bundle.Assessment.ProjectID,
 				riskAssessmentID,
 				userMessage,
 				&bundle,
@@ -124,18 +130,18 @@ func requestAgentRuntimeSessionTurn(
 	ctx context.Context,
 	baseURL string,
 	conversationID string,
+	projectID string,
 	riskAssessmentID string,
 	userMessage string,
 	bundle *db.EvidenceBundle,
 ) (agentConversationReply, error) {
 	payload := map[string]any{
 		"conversation_id":    conversationID,
-		"project_id":         "",
+		"project_id":         projectID,
 		"risk_assessment_id": riskAssessmentID,
 		"message":            userMessage,
 	}
 	if bundle != nil {
-		payload["project_id"] = bundle.Assessment.ProjectID
 		payload["evidence_bundle"] = bundle
 	}
 	rawPayload, err := json.Marshal(payload)

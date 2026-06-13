@@ -410,6 +410,9 @@ func TestAgentConversationTurnUsesConfiguredAgentRuntime(t *testing.T) {
 	if runtimeRequest.RiskAssessmentID != assessmentID {
 		t.Fatalf("expected runtime risk assessment id %q, got %q", assessmentID, runtimeRequest.RiskAssessmentID)
 	}
+	if runtimeRequest.ProjectID != projectID {
+		t.Fatalf("expected runtime project id %q, got %q", projectID, runtimeRequest.ProjectID)
+	}
 	if runtimeRequest.Message != "给我下一步行动计划" {
 		t.Fatalf("expected runtime message, got %q", runtimeRequest.Message)
 	}

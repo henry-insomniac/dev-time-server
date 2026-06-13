@@ -153,6 +153,13 @@ Dev Time 跨端技术架构。定义 GitHub 事实源、事件流、风险引擎
 - `tool_calls`：runtime 实际执行的工具调用摘要。
 - `approval_request`：写操作草稿的用户确认请求；确认前 server 不执行外部写入。
 
+Agent Tool internal API：
+
+- `GET /internal/risk-assessments/{assessmentID}/project-status`：提供项目风险分、等级、最高风险原因和证据引用。
+- `GET /internal/risk-assessments/{assessmentID}/ci-checks`：提供当前风险相关 check_run 摘要。
+- `GET /internal/risk-assessments/{assessmentID}/pull-requests`：提供当前风险相关 PR 摘要。
+- `POST /internal/action-suggestions`：创建 `pending_user_confirmation` 行动草稿；确认前不执行外部 GitHub 写入。
+
 ## 架构变更记录
 
 | 日期 | 变更 | 原因 | 验证 |

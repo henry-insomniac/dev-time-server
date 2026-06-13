@@ -66,6 +66,19 @@ func NewRouter(dependencies ...Dependencies) http.Handler {
 		"/internal/risk-assessments/{assessmentID}/evidence-bundle",
 		server.handleEvidenceBundle,
 	)
+	router.Get(
+		"/internal/risk-assessments/{assessmentID}/project-status",
+		server.handleInternalProjectStatus,
+	)
+	router.Get(
+		"/internal/risk-assessments/{assessmentID}/ci-checks",
+		server.handleInternalCIChecks,
+	)
+	router.Get(
+		"/internal/risk-assessments/{assessmentID}/pull-requests",
+		server.handleInternalPullRequests,
+	)
+	router.Post("/internal/action-suggestions", server.handleInternalCreateActionSuggestion)
 	router.Get("/api/projects/{projectID}/agent-conversation", server.handleAgentConversation)
 	router.Post("/api/agent-conversations/{conversationID}/turns", server.handleAgentConversationTurn)
 	router.Post("/api/action-suggestions/{suggestionID}/confirm", server.handleConfirmActionSuggestion)
