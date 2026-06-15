@@ -175,7 +175,7 @@ func TestAgentConversationTurnListsGitHubRepositoriesWithoutRuntime(t *testing.T
 		http.MethodPost,
 		"/api/agent-conversations/"+conversation.ID+"/turns",
 		[]byte(`{
-			"message": "查看我的 github 项目",
+			"message": "查看我的 github 所有项目",
 			"risk_assessment_id": "`+assessmentID+`"
 		}`),
 	)
