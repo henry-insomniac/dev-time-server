@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -273,6 +275,102 @@ func TestInternalGitHubRepositoryPullRequestsListFromEvents(t *testing.T) {
 		body.PullRequests[0].Title != "Add GitHub tool layer" ||
 		body.PullRequests[0].State != "open" {
 		t.Fatalf("expected pull request from github event store, got %#v", body.PullRequests)
+	}
+}
+
+func TestInternalGitHubRepositoryPullRequestsFallBackToLiveGitHub(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	privateKeyPath := writeTestGitHubAppPrivateKey(t)
+	var installationRequested bool
+	var tokenRequested bool
+	var pullRequestsRequested bool
+	githubServer := httptest.NewServer(http.HandlerFunc(func(
+		response http.ResponseWriter,
+		request *http.Request,
+	) {
+		switch {
+		case request.Method == http.MethodGet &&
+			request.URL.Path == "/repos/henry-insomniac/dev-time-agent/installation":
+			installationRequested = true
+			if !strings.HasPrefix(request.Header.Get("Authorization"), "Bearer ") {
+				t.Fatalf("expected app JWT authorization header, got %q", request.Header.Get("Authorization"))
+			}
+			writeTestJSON(response, map[string]any{"id": 123})
+		case request.Method == http.MethodPost &&
+			request.URL.Path == "/app/installations/123/access_tokens":
+			tokenRequested = true
+			writeTestJSON(response, map[string]any{"token": "installation-token"})
+		case request.Method == http.MethodGet &&
+			request.URL.Path == "/repos/henry-insomniac/dev-time-agent/pulls":
+			pullRequestsRequested = true
+			if request.Header.Get("Authorization") != "Bearer installation-token" {
+				t.Fatalf("expected installation token authorization, got %q", request.Header.Get("Authorization"))
+			}
+			writeTestJSON(response, []map[string]any{
+				{
+					"number":   18,
+					"title":    "Add GitHub tool layer",
+					"state":    "open",
+					"html_url": "https://github.com/henry-insomniac/dev-time-agent/pull/18",
+				},
+			})
+		default:
+			t.Fatalf("unexpected github request %s %s", request.Method, request.URL.Path)
+		}
+	}))
+	defer githubServer.Close()
+
+	store := testsupport.NewMigratedStore(t, ctx)
+	router := api.NewRouter(api.Dependencies{
+		Store: store,
+		GitHubApp: api.GitHubAppConfig{
+			AppID:            "12345",
+			AppSlug:          "dev-time-test",
+			PrivateKeyPath:   privateKeyPath,
+			SetupStateSecret: "state-secret",
+			APIBaseURL:       githubServer.URL,
+		},
+	})
+	importProject(t, router, 1001, "dev-time-agent")
+
+	response := performJSONRequest(
+		router,
+		http.MethodGet,
+		"/internal/github/repositories/repo_1001/pull-requests",
+		nil,
+	)
+	if response.Code != http.StatusOK {
+		t.Fatalf("expected github pull requests 200, got %d: %s", response.Code, response.Body.String())
+	}
+
+	var body struct {
+		PullRequests []struct {
+			EvidenceRef string `json:"evidence_ref"`
+			Number      int    `json:"number"`
+			Title       string `json:"title"`
+			State       string `json:"state"`
+			URL         string `json:"url"`
+		} `json:"pull_requests"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&body); err != nil {
+		t.Fatalf("decode github pull requests: %v", err)
+	}
+	if len(body.PullRequests) != 1 ||
+		body.PullRequests[0].EvidenceRef != "github_live_pull_request_18" ||
+		body.PullRequests[0].Number != 18 ||
+		body.PullRequests[0].Title != "Add GitHub tool layer" ||
+		body.PullRequests[0].State != "open" {
+		t.Fatalf("expected pull request from live github, got %#v", body.PullRequests)
+	}
+	if !installationRequested || !tokenRequested || !pullRequestsRequested {
+		t.Fatalf(
+			"expected installation, token, and pull requests requests, installation=%v token=%v pullRequests=%v",
+			installationRequested,
+			tokenRequested,
+			pullRequestsRequested,
+		)
 	}
 }
 

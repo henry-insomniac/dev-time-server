@@ -16,11 +16,23 @@ import (
 type Dependencies struct {
 	Store               *db.Store
 	AgentRuntimeBaseURL string
+	GitHubApp           GitHubAppConfig
+}
+
+type GitHubAppConfig struct {
+	AppID               string
+	AppSlug             string
+	PrivateKeyPath      string
+	SetupStateSecret    string
+	APIBaseURL          string
+	FrontendBaseURL     string
+	InstallationBaseURL string
 }
 
 type server struct {
 	store               *db.Store
 	agentRuntimeBaseURL string
+	githubApp           GitHubAppConfig
 }
 
 type llmProviderPreset struct {
@@ -51,10 +63,13 @@ func NewRouter(dependencies ...Dependencies) http.Handler {
 	server := server{
 		store:               loaded.Store,
 		agentRuntimeBaseURL: loaded.AgentRuntimeBaseURL,
+		githubApp:           loaded.GitHubApp.withDefaults(),
 	}
 	router := chi.NewRouter()
 	router.Use(localDevCORS)
 	router.Get("/healthz", handleHealthz)
+	router.Get("/api/github/installations/start", server.handleGitHubInstallationStart)
+	router.Get("/api/github/installations/callback", server.handleGitHubInstallationCallback)
 	router.Post("/api/github/repositories/import", server.handleImportRepository)
 	router.Post("/api/github/webhook", server.handleGitHubWebhook)
 	router.Get("/api/projects", server.handleProjects)
@@ -703,6 +718,9 @@ func (server server) handleAgentConversationTurn(response http.ResponseWriter, r
 		agentReply.AgentResponse,
 		agentReply.EvidenceRefs,
 		agentReply.Intent,
+		agentReply.Domain,
+		agentReply.Entities,
+		agentReply.Capabilities,
 		agentReply.ToolCalls,
 		agentReply.ApprovalRequest,
 		agentReply.ReasoningTrace,

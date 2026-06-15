@@ -129,6 +129,8 @@ func TestAgentConversationTurnHandlesGreetingWithoutRiskEvidence(t *testing.T) {
 		AgentResponse string   `json:"agent_response"`
 		EvidenceRefs  []string `json:"evidence_refs"`
 		Intent        string   `json:"intent"`
+		Domain        string   `json:"domain"`
+		Capabilities  []string `json:"capabilities"`
 	}
 	if err := json.NewDecoder(turnResponse.Body).Decode(&turn); err != nil {
 		t.Fatalf("decode turn response: %v", err)
@@ -187,12 +189,20 @@ func TestAgentConversationTurnListsGitHubRepositoriesWithoutRuntime(t *testing.T
 		AgentResponse string   `json:"agent_response"`
 		EvidenceRefs  []string `json:"evidence_refs"`
 		Intent        string   `json:"intent"`
+		Domain        string   `json:"domain"`
+		Capabilities  []string `json:"capabilities"`
 	}
 	if err := json.NewDecoder(turnResponse.Body).Decode(&turn); err != nil {
 		t.Fatalf("decode turn response: %v", err)
 	}
 	if turn.Intent != "github_repository_list" {
 		t.Fatalf("expected github_repository_list intent, got %q", turn.Intent)
+	}
+	if turn.Domain != "github" {
+		t.Fatalf("expected github domain, got %q", turn.Domain)
+	}
+	if len(turn.Capabilities) != 1 || turn.Capabilities[0] != "github.repos.list" {
+		t.Fatalf("expected github.repos.list capability, got %#v", turn.Capabilities)
 	}
 	if !strings.Contains(turn.AgentResponse, "henry-insomniac/dev-time") {
 		t.Fatalf("expected github repository list, got %q", turn.AgentResponse)
@@ -263,8 +273,10 @@ func TestAgentConversationTurnListsAllGitHubRepositoriesWithoutRuntime(t *testin
 	}
 
 	var turn struct {
-		AgentResponse string `json:"agent_response"`
-		Intent        string `json:"intent"`
+		AgentResponse string   `json:"agent_response"`
+		Intent        string   `json:"intent"`
+		Domain        string   `json:"domain"`
+		Capabilities  []string `json:"capabilities"`
 	}
 	if err := json.NewDecoder(turnResponse.Body).Decode(&turn); err != nil {
 		t.Fatalf("decode turn response: %v", err)
@@ -272,9 +284,285 @@ func TestAgentConversationTurnListsAllGitHubRepositoriesWithoutRuntime(t *testin
 	if turn.Intent != "github_repository_list" {
 		t.Fatalf("expected github_repository_list intent, got %q", turn.Intent)
 	}
+	if turn.Domain != "github" {
+		t.Fatalf("expected github domain, got %q", turn.Domain)
+	}
+	if len(turn.Capabilities) != 1 || turn.Capabilities[0] != "github.repos.list" {
+		t.Fatalf("expected github.repos.list capability, got %#v", turn.Capabilities)
+	}
 	if !strings.Contains(turn.AgentResponse, "henry-insomniac/dev-time") ||
 		!strings.Contains(turn.AgentResponse, "henry-insomniac/dev-time-agent") {
 		t.Fatalf("expected all github repositories, got %q", turn.AgentResponse)
+	}
+}
+
+func TestAgentConversationTurnShowsSpecificGitHubRepositoryWithoutRuntime(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	store := testsupport.NewMigratedStore(t, ctx)
+	router := api.NewRouter(api.Dependencies{Store: store})
+
+	projectID, assessmentID := createProjectRisk(t, router)
+	discoverResponse := performJSONRequest(
+		router,
+		http.MethodPost,
+		"/api/settings/github/repositories/discover",
+		[]byte(`{
+			"repositories": [
+				{
+					"github_id": 1002,
+					"owner": "henry-insomniac",
+					"name": "dev-time-agent",
+					"full_name": "henry-insomniac/dev-time-agent"
+				}
+			]
+		}`),
+	)
+	if discoverResponse.Code != http.StatusOK {
+		t.Fatalf("expected discover repositories 200, got %d: %s", discoverResponse.Code, discoverResponse.Body.String())
+	}
+	var discoverBody struct {
+		Repositories []struct {
+			ID       string `json:"id"`
+			FullName string `json:"full_name"`
+		} `json:"repositories"`
+	}
+	if err := json.NewDecoder(discoverResponse.Body).Decode(&discoverBody); err != nil {
+		t.Fatalf("decode discover response: %v", err)
+	}
+	repositoryID := ""
+	for _, repository := range discoverBody.Repositories {
+		if repository.FullName == "henry-insomniac/dev-time-agent" {
+			repositoryID = repository.ID
+			break
+		}
+	}
+	if repositoryID == "" {
+		t.Fatalf("expected discovered dev-time-agent repository, got %#v", discoverBody.Repositories)
+	}
+	loadResponse := performJSONRequest(
+		router,
+		http.MethodPost,
+		"/api/settings/github/repositories/"+repositoryID+"/load-project",
+		nil,
+	)
+	if loadResponse.Code != http.StatusCreated {
+		t.Fatalf("expected load repository 201, got %d: %s", loadResponse.Code, loadResponse.Body.String())
+	}
+
+	conversationResponse := performJSONRequest(
+		router,
+		http.MethodGet,
+		"/api/projects/"+projectID+"/agent-conversation?risk_assessment_id="+assessmentID,
+		nil,
+	)
+	if conversationResponse.Code != http.StatusOK {
+		t.Fatalf("expected conversation status 200, got %d: %s", conversationResponse.Code, conversationResponse.Body.String())
+	}
+
+	var conversation struct {
+		ID string `json:"id"`
+	}
+	if err := json.NewDecoder(conversationResponse.Body).Decode(&conversation); err != nil {
+		t.Fatalf("decode conversation response: %v", err)
+	}
+
+	turnResponse := performJSONRequest(
+		router,
+		http.MethodPost,
+		"/api/agent-conversations/"+conversation.ID+"/turns",
+		[]byte(`{
+			"message": "查看 dev-time-agent 项目",
+			"risk_assessment_id": "`+assessmentID+`"
+		}`),
+	)
+	if turnResponse.Code != http.StatusCreated {
+		t.Fatalf("expected turn status 201, got %d: %s", turnResponse.Code, turnResponse.Body.String())
+	}
+
+	var turn struct {
+		AgentResponse string   `json:"agent_response"`
+		EvidenceRefs  []string `json:"evidence_refs"`
+		Intent        string   `json:"intent"`
+		Domain        string   `json:"domain"`
+		Entities      map[string]struct {
+			FullName string `json:"full_name"`
+		} `json:"entities"`
+		Capabilities []string `json:"capabilities"`
+	}
+	if err := json.NewDecoder(turnResponse.Body).Decode(&turn); err != nil {
+		t.Fatalf("decode turn response: %v", err)
+	}
+	if turn.Intent != "github_repository_detail" {
+		t.Fatalf("expected github_repository_detail intent, got %q", turn.Intent)
+	}
+	if turn.Domain != "github" {
+		t.Fatalf("expected github domain, got %q", turn.Domain)
+	}
+	if turn.Entities["repository"].FullName != "henry-insomniac/dev-time-agent" {
+		t.Fatalf("expected repository entity, got %#v", turn.Entities)
+	}
+	if len(turn.Capabilities) != 1 || turn.Capabilities[0] != "github.repo.detail" {
+		t.Fatalf("expected github.repo.detail capability, got %#v", turn.Capabilities)
+	}
+	if !strings.Contains(turn.AgentResponse, "henry-insomniac/dev-time-agent") ||
+		!strings.Contains(turn.AgentResponse, repositoryID) ||
+		!strings.Contains(turn.AgentResponse, "project_repo_1002") {
+		t.Fatalf("expected specific github repository detail, got %q", turn.AgentResponse)
+	}
+	if strings.Contains(turn.AgentResponse, "评估当前风险") {
+		t.Fatalf("expected github answer instead of risk clarification, got %q", turn.AgentResponse)
+	}
+	if len(turn.EvidenceRefs) != 0 {
+		t.Fatalf("expected no risk evidence refs, got %#v", turn.EvidenceRefs)
+	}
+}
+
+func TestAgentConversationTurnHandlesGitHubDomainQuestionsWithoutRuntime(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	store := testsupport.NewMigratedStore(t, ctx)
+	router := api.NewRouter(api.Dependencies{Store: store})
+
+	createGitHubDomainFixture(t, router)
+	projectID := "project_repo_1002"
+	riskResponse := performJSONRequest(router, http.MethodGet, "/api/projects/"+projectID+"/risk", nil)
+	if riskResponse.Code != http.StatusOK {
+		t.Fatalf("expected risk response 200, got %d: %s", riskResponse.Code, riskResponse.Body.String())
+	}
+	var risk struct {
+		Assessment struct {
+			ID string `json:"id"`
+		} `json:"assessment"`
+	}
+	if err := json.NewDecoder(riskResponse.Body).Decode(&risk); err != nil {
+		t.Fatalf("decode risk response: %v", err)
+	}
+
+	conversationResponse := performJSONRequest(
+		router,
+		http.MethodGet,
+		"/api/projects/"+projectID+"/agent-conversation?risk_assessment_id="+risk.Assessment.ID,
+		nil,
+	)
+	if conversationResponse.Code != http.StatusOK {
+		t.Fatalf("expected conversation status 200, got %d: %s", conversationResponse.Code, conversationResponse.Body.String())
+	}
+	var conversation struct {
+		ID string `json:"id"`
+	}
+	if err := json.NewDecoder(conversationResponse.Body).Decode(&conversation); err != nil {
+		t.Fatalf("decode conversation response: %v", err)
+	}
+
+	cases := []struct {
+		name                       string
+		message                    string
+		expectedIntent             string
+		expectedCapability         string
+		expectedRepositoryFullName string
+		expectedResponse           []string
+	}{
+		{
+			name:                       "pull requests",
+			message:                    "查看 dev-time-agent 的 PR",
+			expectedIntent:             "github_pull_requests_list",
+			expectedCapability:         "github.pull_requests.list",
+			expectedRepositoryFullName: "henry-insomniac/dev-time-agent",
+			expectedResponse: []string{
+				"henry-insomniac/dev-time-agent",
+				"PR #18",
+				"Add GitHub tool layer",
+			},
+		},
+		{
+			name:                       "issues",
+			message:                    "查看 dev-time-agent 的 issue",
+			expectedIntent:             "github_issues_list",
+			expectedCapability:         "github.issues.list",
+			expectedRepositoryFullName: "henry-insomniac/dev-time-agent",
+			expectedResponse: []string{
+				"henry-insomniac/dev-time-agent",
+				"Issue #42",
+				"Add issue reader",
+			},
+		},
+		{
+			name:                       "checks",
+			message:                    "查看 dev-time-agent 的 CI",
+			expectedIntent:             "github_checks_list",
+			expectedCapability:         "github.checks.list",
+			expectedRepositoryFullName: "henry-insomniac/dev-time-agent",
+			expectedResponse: []string{
+				"henry-insomniac/dev-time-agent",
+				"test",
+				"failure",
+			},
+		},
+		{
+			name:               "auth status",
+			message:            "github 授权状态",
+			expectedIntent:     "github_auth_status",
+			expectedCapability: "github.auth.status",
+			expectedResponse: []string{
+				"GitHub 已连接",
+				"1 个仓库",
+			},
+		},
+	}
+
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			turnResponse := performJSONRequest(
+				router,
+				http.MethodPost,
+				"/api/agent-conversations/"+conversation.ID+"/turns",
+				[]byte(`{
+					"message": "`+testCase.message+`",
+					"risk_assessment_id": "`+risk.Assessment.ID+`"
+				}`),
+			)
+			if turnResponse.Code != http.StatusCreated {
+				t.Fatalf("expected turn status 201, got %d: %s", turnResponse.Code, turnResponse.Body.String())
+			}
+
+			var turn struct {
+				AgentResponse string   `json:"agent_response"`
+				EvidenceRefs  []string `json:"evidence_refs"`
+				Intent        string   `json:"intent"`
+				Domain        string   `json:"domain"`
+				Entities      map[string]struct {
+					FullName string `json:"full_name"`
+				} `json:"entities"`
+				Capabilities []string `json:"capabilities"`
+			}
+			if err := json.NewDecoder(turnResponse.Body).Decode(&turn); err != nil {
+				t.Fatalf("decode turn response: %v", err)
+			}
+			if turn.Intent != testCase.expectedIntent {
+				t.Fatalf("expected %s intent, got %q", testCase.expectedIntent, turn.Intent)
+			}
+			if turn.Domain != "github" {
+				t.Fatalf("expected github domain, got %q", turn.Domain)
+			}
+			if len(turn.Capabilities) != 1 || turn.Capabilities[0] != testCase.expectedCapability {
+				t.Fatalf("expected capability %q, got %#v", testCase.expectedCapability, turn.Capabilities)
+			}
+			if testCase.expectedRepositoryFullName != "" &&
+				turn.Entities["repository"].FullName != testCase.expectedRepositoryFullName {
+				t.Fatalf("expected repository entity %q, got %#v", testCase.expectedRepositoryFullName, turn.Entities)
+			}
+			for _, expected := range testCase.expectedResponse {
+				if !strings.Contains(turn.AgentResponse, expected) {
+					t.Fatalf("expected response to contain %q, got %q", expected, turn.AgentResponse)
+				}
+			}
+			if strings.Contains(turn.AgentResponse, "评估当前风险") {
+				t.Fatalf("expected github answer instead of risk clarification, got %q", turn.AgentResponse)
+			}
+		})
 	}
 }
 
@@ -483,6 +771,9 @@ func TestAgentConversationTurnUsesConfiguredAgentRuntime(t *testing.T) {
 			"user_message": "给我下一步行动计划",
 			"agent_response": "Agent Runtime 已识别为行动规划请求。",
 			"intent": "action_plan",
+			"domain": "github",
+			"entities": {"repository":{"id":"repo_1002","name":"dev-time-agent","full_name":"henry-insomniac/dev-time-agent"}},
+			"capabilities": ["github.pull_requests.list"],
 			"confidence": 0.9,
 			"evidence_refs": ["event_check-run-conversation-1"],
 			"current_node": "planner",
@@ -531,6 +822,13 @@ func TestAgentConversationTurnUsesConfiguredAgentRuntime(t *testing.T) {
 		AgentResponse string   `json:"agent_response"`
 		EvidenceRefs  []string `json:"evidence_refs"`
 		Intent        string   `json:"intent"`
+		Domain        string   `json:"domain"`
+		Entities      map[string]struct {
+			ID       string `json:"id"`
+			Name     string `json:"name"`
+			FullName string `json:"full_name"`
+		} `json:"entities"`
+		Capabilities []string `json:"capabilities"`
 	}
 	if err := json.NewDecoder(turnResponse.Body).Decode(&turn); err != nil {
 		t.Fatalf("decode turn response: %v", err)
@@ -558,6 +856,15 @@ func TestAgentConversationTurnUsesConfiguredAgentRuntime(t *testing.T) {
 	}
 	if turn.Intent != "action_plan" {
 		t.Fatalf("expected action_plan intent, got %q", turn.Intent)
+	}
+	if turn.Domain != "github" {
+		t.Fatalf("expected runtime domain, got %q", turn.Domain)
+	}
+	if turn.Entities["repository"].FullName != "henry-insomniac/dev-time-agent" {
+		t.Fatalf("expected runtime entities, got %#v", turn.Entities)
+	}
+	if len(turn.Capabilities) != 1 || turn.Capabilities[0] != "github.pull_requests.list" {
+		t.Fatalf("expected runtime capabilities, got %#v", turn.Capabilities)
 	}
 	if len(turn.EvidenceRefs) != 1 || turn.EvidenceRefs[0] != "event_check-run-conversation-1" {
 		t.Fatalf("expected runtime evidence refs, got %#v", turn.EvidenceRefs)
@@ -987,4 +1294,80 @@ func createProjectRisk(t *testing.T, router http.Handler) (string, string) {
 	}
 
 	return projectID, risk.Assessment.ID
+}
+
+func createGitHubDomainFixture(t *testing.T, router http.Handler) {
+	t.Helper()
+
+	webhookResponse := performWebhookRequest(
+		router,
+		"domain-check-run-1",
+		"check_run",
+		[]byte(`{
+			"repository": {
+				"id": 1002,
+				"name": "dev-time-agent",
+				"full_name": "henry-insomniac/dev-time-agent",
+				"owner": { "login": "henry-insomniac" }
+			},
+			"check_run": {
+				"id": 421,
+				"name": "test",
+				"status": "completed",
+				"conclusion": "failure",
+				"html_url": "https://github.test/henry-insomniac/dev-time-agent/actions/runs/421"
+			}
+		}`),
+	)
+	if webhookResponse.Code != http.StatusAccepted {
+		t.Fatalf("expected check_run webhook 202, got %d: %s", webhookResponse.Code, webhookResponse.Body.String())
+	}
+
+	webhookResponse = performWebhookRequest(
+		router,
+		"domain-pull-request-1",
+		"pull_request",
+		[]byte(`{
+			"repository": {
+				"id": 1002,
+				"name": "dev-time-agent",
+				"full_name": "henry-insomniac/dev-time-agent",
+				"owner": { "login": "henry-insomniac" }
+			},
+			"pull_request": {
+				"id": 18,
+				"number": 18,
+				"title": "Add GitHub tool layer",
+				"state": "open",
+				"html_url": "https://github.test/henry-insomniac/dev-time-agent/pull/18"
+			}
+		}`),
+	)
+	if webhookResponse.Code != http.StatusAccepted {
+		t.Fatalf("expected pull_request webhook 202, got %d: %s", webhookResponse.Code, webhookResponse.Body.String())
+	}
+
+	webhookResponse = performWebhookRequest(
+		router,
+		"domain-issue-1",
+		"issues",
+		[]byte(`{
+			"repository": {
+				"id": 1002,
+				"name": "dev-time-agent",
+				"full_name": "henry-insomniac/dev-time-agent",
+				"owner": { "login": "henry-insomniac" }
+			},
+			"issue": {
+				"id": 42,
+				"number": 42,
+				"title": "Add issue reader",
+				"state": "open",
+				"html_url": "https://github.test/henry-insomniac/dev-time-agent/issues/42"
+			}
+		}`),
+	)
+	if webhookResponse.Code != http.StatusAccepted {
+		t.Fatalf("expected issues webhook 202, got %d: %s", webhookResponse.Code, webhookResponse.Body.String())
+	}
 }

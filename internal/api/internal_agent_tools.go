@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"time"
 
@@ -122,12 +123,12 @@ func (server server) handleInternalGitHubAuthStatus(response http.ResponseWriter
 		return
 	}
 
-	writeGitHubAccessStatus(response, repositories)
+	server.writeGitHubAccessStatus(response, repositories)
 }
 
 func (server server) handleGitHubSettings(response http.ResponseWriter, request *http.Request) {
 	if server.store == nil {
-		writeGitHubAccessStatus(response, []db.GitHubRepositoryAccess{}, "unavailable")
+		server.writeGitHubAccessStatus(response, []db.GitHubRepositoryAccess{}, "unavailable")
 		return
 	}
 
@@ -139,7 +140,7 @@ func (server server) handleGitHubSettings(response http.ResponseWriter, request 
 		return
 	}
 
-	writeGitHubAccessStatus(response, repositories)
+	server.writeGitHubAccessStatus(response, repositories)
 }
 
 func (server server) handleDiscoverGitHubRepositories(response http.ResponseWriter, request *http.Request) {
@@ -194,7 +195,7 @@ func (server server) handleDiscoverGitHubRepositories(response http.ResponseWrit
 		})
 		return
 	}
-	writeGitHubAccessStatus(response, repositories)
+	server.writeGitHubAccessStatus(response, repositories)
 }
 
 func (server server) handleSetGitHubRepositoryAnalysis(response http.ResponseWriter, request *http.Request) {
@@ -374,7 +375,7 @@ func (server server) handleInternalGitHubRepositoryPullRequests(
 	response http.ResponseWriter,
 	request *http.Request,
 ) {
-	events, ok := server.loadInternalGitHubRepositoryEvents(
+	repository, events, ok := server.loadInternalGitHubRepositoryEvents(
 		response,
 		request,
 		"pull_request",
@@ -384,6 +385,16 @@ func (server server) handleInternalGitHubRepositoryPullRequests(
 	}
 
 	pullRequests := []internalPullRequest{}
+	if len(events) == 0 && server.githubApp.isConfigured() {
+		livePullRequests, err := server.liveGitHubPullRequests(request.Context(), repository)
+		if err != nil {
+			writeJSON(response, http.StatusBadGateway, map[string]string{
+				"error": "list live github pull requests failed",
+			})
+			return
+		}
+		pullRequests = livePullRequests
+	}
 	for _, event := range events {
 		var payload struct {
 			PullRequest struct {
@@ -419,7 +430,7 @@ func (server server) handleInternalGitHubRepositoryIssues(
 	response http.ResponseWriter,
 	request *http.Request,
 ) {
-	events, ok := server.loadInternalGitHubRepositoryEvents(
+	repository, events, ok := server.loadInternalGitHubRepositoryEvents(
 		response,
 		request,
 		"issues",
@@ -429,6 +440,16 @@ func (server server) handleInternalGitHubRepositoryIssues(
 	}
 
 	issues := []internalIssue{}
+	if len(events) == 0 && server.githubApp.isConfigured() {
+		liveIssues, err := server.liveGitHubIssues(request.Context(), repository)
+		if err != nil {
+			writeJSON(response, http.StatusBadGateway, map[string]string{
+				"error": "list live github issues failed",
+			})
+			return
+		}
+		issues = liveIssues
+	}
 	for _, event := range events {
 		var payload struct {
 			Issue struct {
@@ -464,7 +485,7 @@ func (server server) handleInternalGitHubRepositoryChecks(
 	response http.ResponseWriter,
 	request *http.Request,
 ) {
-	events, ok := server.loadInternalGitHubRepositoryEvents(
+	repository, events, ok := server.loadInternalGitHubRepositoryEvents(
 		response,
 		request,
 		"check_run",
@@ -474,6 +495,16 @@ func (server server) handleInternalGitHubRepositoryChecks(
 	}
 
 	checks := []internalCheckRun{}
+	if len(events) == 0 && server.githubApp.isConfigured() {
+		liveChecks, err := server.liveGitHubChecks(request.Context(), repository)
+		if err != nil {
+			writeJSON(response, http.StatusBadGateway, map[string]string{
+				"error": "list live github checks failed",
+			})
+			return
+		}
+		checks = liveChecks
+	}
 	for _, event := range events {
 		var payload struct {
 			CheckRun struct {
@@ -509,12 +540,12 @@ func (server server) loadInternalGitHubRepositoryEvents(
 	response http.ResponseWriter,
 	request *http.Request,
 	eventType string,
-) ([]db.GitHubRepositoryEvent, bool) {
+) (db.GitHubRepositoryAccess, []db.GitHubRepositoryEvent, bool) {
 	if server.store == nil {
 		writeJSON(response, http.StatusServiceUnavailable, map[string]string{
 			"error": "repository store is not configured",
 		})
-		return nil, false
+		return db.GitHubRepositoryAccess{}, nil, false
 	}
 
 	repositoryID := chi.URLParam(request, "repositoryID")
@@ -522,7 +553,20 @@ func (server server) loadInternalGitHubRepositoryEvents(
 		writeJSON(response, http.StatusBadRequest, map[string]string{
 			"error": "repository id is required",
 		})
-		return nil, false
+		return db.GitHubRepositoryAccess{}, nil, false
+	}
+	repository, err := server.store.GetGitHubRepositoryAccess(request.Context(), repositoryID)
+	if err != nil {
+		status := http.StatusInternalServerError
+		message := "load github repository access failed"
+		if errors.Is(err, db.ErrNotFound) {
+			status = http.StatusNotFound
+			message = "github repository not found"
+		}
+		writeJSON(response, status, map[string]string{
+			"error": message,
+		})
+		return db.GitHubRepositoryAccess{}, nil, false
 	}
 
 	events, err := server.store.ListGitHubRepositoryEvents(
@@ -534,13 +578,13 @@ func (server server) loadInternalGitHubRepositoryEvents(
 		writeJSON(response, http.StatusInternalServerError, map[string]string{
 			"error": "list github repository events failed",
 		})
-		return nil, false
+		return db.GitHubRepositoryAccess{}, nil, false
 	}
 
-	return events, true
+	return repository, events, true
 }
 
-func writeGitHubAccessStatus(
+func (server server) writeGitHubAccessStatus(
 	response http.ResponseWriter,
 	repositories []db.GitHubRepositoryAccess,
 	storageStatuses ...string,
@@ -551,16 +595,18 @@ func writeGitHubAccessStatus(
 	}
 
 	writeJSON(response, http.StatusOK, struct {
-		Connected     bool                        `json:"connected"`
-		Provider      string                      `json:"provider"`
-		Repositories  []db.GitHubRepositoryAccess `json:"repositories"`
-		Permissions   []string                    `json:"permissions"`
-		StorageStatus string                      `json:"storage_status"`
+		Connected              bool                        `json:"connected"`
+		Provider               string                      `json:"provider"`
+		Repositories           []db.GitHubRepositoryAccess `json:"repositories"`
+		Permissions            []string                    `json:"permissions"`
+		StorageStatus          string                      `json:"storage_status"`
+		InstallationConfigured bool                        `json:"installation_configured"`
 	}{
-		Connected:     len(repositories) > 0,
-		Provider:      "github_app",
-		Repositories:  repositories,
-		StorageStatus: storageStatus,
+		Connected:              len(repositories) > 0,
+		Provider:               "github_app",
+		Repositories:           repositories,
+		StorageStatus:          storageStatus,
+		InstallationConfigured: server.githubApp.isConfigured(),
 		Permissions: []string{
 			"metadata:read",
 			"contents:read",

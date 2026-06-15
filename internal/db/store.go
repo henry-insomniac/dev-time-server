@@ -180,6 +180,9 @@ type AgentConversationTurn struct {
 	AgentResponse   string               `json:"agent_response"`
 	EvidenceRefs    []string             `json:"evidence_refs"`
 	Intent          string               `json:"intent"`
+	Domain          string               `json:"domain"`
+	Entities        map[string]any       `json:"entities"`
+	Capabilities    []string             `json:"capabilities"`
 	TraceEvents     []AgentTraceEvent    `json:"trace_events"`
 	ToolCalls       []map[string]any     `json:"tool_calls"`
 	ApprovalRequest map[string]any       `json:"approval_request,omitempty"`
@@ -284,18 +287,59 @@ func (store *Store) ImportRepository(
 ) (RepositoryImport, error) {
 	repositoryID := fmt.Sprintf("repo_%d", input.GitHubID)
 
-	var repository Repository
-	var created bool
+	var existingID string
 	err := store.pool.QueryRow(
+		ctx,
+		`
+		SELECT id
+		FROM repositories
+		WHERE github_id = $1 OR full_name = $2
+		ORDER BY CASE WHEN github_id = $1 THEN 0 ELSE 1 END
+		LIMIT 1
+		`,
+		input.GitHubID,
+		input.FullName,
+	).Scan(&existingID)
+	if err != nil && err != pgx.ErrNoRows {
+		return RepositoryImport{}, fmt.Errorf("find repository import target: %w", err)
+	}
+	if existingID != "" {
+		var repository Repository
+		if err := store.pool.QueryRow(
+			ctx,
+			`
+			UPDATE repositories
+			SET github_id = $2,
+			    owner = $3,
+			    name = $4,
+			    full_name = $5
+			WHERE id = $1
+			RETURNING id, github_id, owner, name, full_name
+			`,
+			existingID,
+			input.GitHubID,
+			input.Owner,
+			input.Name,
+			input.FullName,
+		).Scan(
+			&repository.ID,
+			&repository.GitHubID,
+			&repository.Owner,
+			&repository.Name,
+			&repository.FullName,
+		); err != nil {
+			return RepositoryImport{}, fmt.Errorf("update repository import target: %w", err)
+		}
+		return RepositoryImport{Repository: repository, Created: false}, nil
+	}
+
+	var repository Repository
+	err = store.pool.QueryRow(
 		ctx,
 		`
 		INSERT INTO repositories (id, github_id, owner, name, full_name)
 		VALUES ($1, $2, $3, $4, $5)
-		ON CONFLICT (github_id) DO UPDATE
-		SET owner = EXCLUDED.owner,
-		    name = EXCLUDED.name,
-		    full_name = EXCLUDED.full_name
-		RETURNING id, github_id, owner, name, full_name, (xmax = 0) AS created
+		RETURNING id, github_id, owner, name, full_name
 		`,
 		repositoryID,
 		input.GitHubID,
@@ -308,13 +352,12 @@ func (store *Store) ImportRepository(
 		&repository.Owner,
 		&repository.Name,
 		&repository.FullName,
-		&created,
 	)
 	if err != nil {
 		return RepositoryImport{}, fmt.Errorf("import repository: %w", err)
 	}
 
-	return RepositoryImport{Repository: repository, Created: created}, nil
+	return RepositoryImport{Repository: repository, Created: true}, nil
 }
 
 func (store *Store) EnsureProjectForRepository(
@@ -1289,6 +1332,9 @@ func (store *Store) AddAgentConversationTurn(
 	agentResponse string,
 	evidenceRefs []string,
 	intent string,
+	domain string,
+	entities map[string]any,
+	capabilities []string,
 	toolCalls []map[string]any,
 	approvalRequest map[string]any,
 	reasoningTrace []ReasoningTraceStep,
@@ -1298,6 +1344,12 @@ func (store *Store) AddAgentConversationTurn(
 	}
 	if toolCalls == nil {
 		toolCalls = []map[string]any{}
+	}
+	if entities == nil {
+		entities = map[string]any{}
+	}
+	if capabilities == nil {
+		capabilities = []string{}
 	}
 	if reasoningTrace == nil {
 		reasoningTrace = []ReasoningTraceStep{}
@@ -1329,6 +1381,9 @@ func (store *Store) AddAgentConversationTurn(
 		AgentResponse:   agentResponse,
 		EvidenceRefs:    evidenceRefs,
 		Intent:          intent,
+		Domain:          domain,
+		Entities:        entities,
+		Capabilities:    capabilities,
 		ToolCalls:       toolCalls,
 		ApprovalRequest: approvalRequest,
 		ReasoningTrace:  reasoningTrace,

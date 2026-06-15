@@ -44,6 +44,57 @@ func TestImportGitHubRepositoryCreatesProjectIdempotently(t *testing.T) {
 	}
 }
 
+func TestImportGitHubRepositoryUpdatesExistingFullNameGitHubID(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	store := testsupport.NewMigratedStore(t, ctx)
+	router := api.NewRouter(api.Dependencies{Store: store})
+
+	first := performJSONRequest(
+		router,
+		http.MethodPost,
+		"/api/github/repositories/import",
+		[]byte(`{
+			"github_id": 9001,
+			"owner": "henry-insomniac",
+			"name": "dev-time",
+			"full_name": "henry-insomniac/dev-time"
+		}`),
+	)
+	if first.Code != http.StatusCreated {
+		t.Fatalf("expected first import 201, got %d: %s", first.Code, first.Body.String())
+	}
+	second := performJSONRequest(
+		router,
+		http.MethodPost,
+		"/api/github/repositories/import",
+		[]byte(`{
+			"github_id": 1265191048,
+			"owner": "henry-insomniac",
+			"name": "dev-time",
+			"full_name": "henry-insomniac/dev-time"
+		}`),
+	)
+	if second.Code != http.StatusOK {
+		t.Fatalf("expected second import 200, got %d: %s", second.Code, second.Body.String())
+	}
+
+	var body struct {
+		Repository struct {
+			ID       string `json:"id"`
+			GitHubID int64  `json:"github_id"`
+		} `json:"repository"`
+	}
+	if err := json.NewDecoder(second.Body).Decode(&body); err != nil {
+		t.Fatalf("decode second import response: %v", err)
+	}
+	if body.Repository.ID != "repo_9001" ||
+		body.Repository.GitHubID != 1265191048 {
+		t.Fatalf("expected same repository with updated github id, got %#v", body.Repository)
+	}
+}
+
 func performJSONRequest(
 	handler http.Handler,
 	method string,

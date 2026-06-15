@@ -42,6 +42,15 @@ func main() {
 		api.NewRouter(api.Dependencies{
 			Store:               store,
 			AgentRuntimeBaseURL: loaded.AgentRuntimeBaseURL,
+			GitHubApp: api.GitHubAppConfig{
+				AppID:               loaded.GitHubAppID,
+				AppSlug:             loaded.GitHubAppSlug,
+				PrivateKeyPath:      loaded.GitHubPrivateKeyPath,
+				SetupStateSecret:    loaded.GitHubSetupStateSecret,
+				APIBaseURL:          loaded.GitHubAPIBaseURL,
+				InstallationBaseURL: loaded.GitHubInstallBaseURL,
+				FrontendBaseURL:     loaded.FrontendBaseURL,
+			},
 		}),
 	); err != nil {
 		log.Fatalf("server stopped: %v", err)
