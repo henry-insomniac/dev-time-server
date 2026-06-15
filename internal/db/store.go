@@ -40,6 +40,19 @@ type Repository struct {
 	FullName string `json:"full_name"`
 }
 
+type GitHubRepositoryAccess struct {
+	ID                string     `json:"id"`
+	GitHubID          int64      `json:"github_id"`
+	Owner             string     `json:"owner"`
+	Name              string     `json:"name"`
+	FullName          string     `json:"full_name"`
+	ProjectID         *string    `json:"project_id"`
+	AnalysisEnabled   bool       `json:"analysis_enabled"`
+	SyncStatus        string     `json:"sync_status"`
+	LastSyncedAt      *time.Time `json:"last_synced_at"`
+	SyncFailureReason *string    `json:"sync_failure_reason"`
+}
+
 type Project struct {
 	ID           string `json:"id"`
 	RepositoryID string `json:"repository_id"`
@@ -52,20 +65,26 @@ type RepositoryImport struct {
 }
 
 type GitHubEventInput struct {
-	RepositoryID string
-	DeliveryID   string
-	EventType    string
-	Payload      json.RawMessage
-	OccurredAt   time.Time
+	RepositoryID      string
+	DeliveryID        string
+	EventType         string
+	GitHubObjectType  string
+	GitHubObjectID    string
+	NormalizedSummary string
+	Payload           json.RawMessage
+	OccurredAt        time.Time
 }
 
 type GitHubEvent struct {
-	ID           string          `json:"id"`
-	RepositoryID string          `json:"repository_id"`
-	DeliveryID   string          `json:"delivery_id"`
-	EventType    string          `json:"event_type"`
-	Payload      json.RawMessage `json:"payload"`
-	Duplicate    bool            `json:"duplicate"`
+	ID                string          `json:"id"`
+	RepositoryID      string          `json:"repository_id"`
+	DeliveryID        string          `json:"delivery_id"`
+	EventType         string          `json:"event_type"`
+	GitHubObjectType  string          `json:"github_object_type"`
+	GitHubObjectID    string          `json:"github_object_id"`
+	NormalizedSummary string          `json:"normalized_summary"`
+	Payload           json.RawMessage `json:"payload"`
+	Duplicate         bool            `json:"duplicate"`
 }
 
 type RiskAssessment struct {
@@ -130,9 +149,21 @@ type EvidenceBundle struct {
 }
 
 type EvidenceEvent struct {
-	ID        string          `json:"id"`
-	EventType string          `json:"event_type"`
-	Payload   json.RawMessage `json:"payload"`
+	ID                string          `json:"id"`
+	EventType         string          `json:"event_type"`
+	GitHubObjectType  string          `json:"github_object_type"`
+	GitHubObjectID    string          `json:"github_object_id"`
+	NormalizedSummary string          `json:"normalized_summary"`
+	Payload           json.RawMessage `json:"payload"`
+}
+
+type GitHubRepositoryEvent struct {
+	ID                string          `json:"id"`
+	EventType         string          `json:"event_type"`
+	GitHubObjectType  string          `json:"github_object_type"`
+	GitHubObjectID    string          `json:"github_object_id"`
+	NormalizedSummary string          `json:"normalized_summary"`
+	Payload           json.RawMessage `json:"payload"`
 }
 
 type AgentConversation struct {
@@ -314,6 +345,246 @@ func (store *Store) EnsureProjectForRepository(
 	return project, nil
 }
 
+func (store *Store) ListGitHubRepositoryAccess(
+	ctx context.Context,
+) ([]GitHubRepositoryAccess, error) {
+	return store.listGitHubRepositoryAccess(ctx, false)
+}
+
+func (store *Store) ListAnalyzableGitHubRepositoryAccess(
+	ctx context.Context,
+) ([]GitHubRepositoryAccess, error) {
+	return store.listGitHubRepositoryAccess(ctx, true)
+}
+
+func (store *Store) listGitHubRepositoryAccess(
+	ctx context.Context,
+	analysisEnabledOnly bool,
+) ([]GitHubRepositoryAccess, error) {
+	whereClause := ""
+	if analysisEnabledOnly {
+		whereClause = "WHERE r.analysis_enabled"
+	}
+
+	query := `
+	SELECT
+		r.id,
+		r.github_id,
+		r.owner,
+		r.name,
+		r.full_name,
+		p.id,
+		r.analysis_enabled,
+		r.sync_status,
+		r.last_synced_at,
+		r.sync_failure_reason
+	FROM repositories r
+	LEFT JOIN projects p ON p.repository_id = r.id
+	` + whereClause + `
+	ORDER BY r.full_name ASC
+	`
+	rows, err := store.pool.Query(
+		ctx,
+		query,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("list github repository access: %w", err)
+	}
+	defer rows.Close()
+
+	repositories := []GitHubRepositoryAccess{}
+	for rows.Next() {
+		var repository GitHubRepositoryAccess
+		if err := rows.Scan(
+			&repository.ID,
+			&repository.GitHubID,
+			&repository.Owner,
+			&repository.Name,
+			&repository.FullName,
+			&repository.ProjectID,
+			&repository.AnalysisEnabled,
+			&repository.SyncStatus,
+			&repository.LastSyncedAt,
+			&repository.SyncFailureReason,
+		); err != nil {
+			return nil, fmt.Errorf("scan github repository access: %w", err)
+		}
+		repositories = append(repositories, repository)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate github repository access: %w", err)
+	}
+
+	return repositories, nil
+}
+
+func (store *Store) SetRepositoryAnalysisEnabled(
+	ctx context.Context,
+	repositoryID string,
+	analysisEnabled bool,
+) (GitHubRepositoryAccess, error) {
+	commandTag, err := store.pool.Exec(
+		ctx,
+		`
+		UPDATE repositories
+		SET analysis_enabled = $2
+		WHERE id = $1
+		`,
+		repositoryID,
+		analysisEnabled,
+	)
+	if err != nil {
+		return GitHubRepositoryAccess{}, fmt.Errorf("set repository analysis enabled: %w", err)
+	}
+	if commandTag.RowsAffected() == 0 {
+		return GitHubRepositoryAccess{}, ErrNotFound
+	}
+
+	repository, err := store.GetGitHubRepositoryAccess(ctx, repositoryID)
+	if err != nil {
+		return GitHubRepositoryAccess{}, err
+	}
+
+	return repository, nil
+}
+
+func (store *Store) MarkRepositorySyncing(
+	ctx context.Context,
+	repositoryID string,
+) (GitHubRepositoryAccess, error) {
+	commandTag, err := store.pool.Exec(
+		ctx,
+		`
+		UPDATE repositories
+		SET sync_status = 'syncing',
+		    sync_failure_reason = NULL
+		WHERE id = $1
+		`,
+		repositoryID,
+	)
+	if err != nil {
+		return GitHubRepositoryAccess{}, fmt.Errorf("mark repository syncing: %w", err)
+	}
+	if commandTag.RowsAffected() == 0 {
+		return GitHubRepositoryAccess{}, ErrNotFound
+	}
+
+	repository, err := store.GetGitHubRepositoryAccess(ctx, repositoryID)
+	if err != nil {
+		return GitHubRepositoryAccess{}, err
+	}
+
+	return repository, nil
+}
+
+func (store *Store) MarkRepositorySyncFailed(
+	ctx context.Context,
+	repositoryID string,
+	reason string,
+) (GitHubRepositoryAccess, error) {
+	commandTag, err := store.pool.Exec(
+		ctx,
+		`
+		UPDATE repositories
+		SET sync_status = 'failed',
+		    sync_failure_reason = $2
+		WHERE id = $1
+		`,
+		repositoryID,
+		reason,
+	)
+	if err != nil {
+		return GitHubRepositoryAccess{}, fmt.Errorf("mark repository sync failed: %w", err)
+	}
+	if commandTag.RowsAffected() == 0 {
+		return GitHubRepositoryAccess{}, ErrNotFound
+	}
+
+	repository, err := store.GetGitHubRepositoryAccess(ctx, repositoryID)
+	if err != nil {
+		return GitHubRepositoryAccess{}, err
+	}
+
+	return repository, nil
+}
+
+func (store *Store) MarkRepositorySyncSucceeded(
+	ctx context.Context,
+	repositoryID string,
+	syncedAt time.Time,
+) error {
+	if syncedAt.IsZero() {
+		syncedAt = time.Now().UTC()
+	}
+
+	commandTag, err := store.pool.Exec(
+		ctx,
+		`
+		UPDATE repositories
+		SET sync_status = 'succeeded',
+		    last_synced_at = $2,
+		    sync_failure_reason = NULL
+		WHERE id = $1
+		`,
+		repositoryID,
+		syncedAt,
+	)
+	if err != nil {
+		return fmt.Errorf("mark repository sync succeeded: %w", err)
+	}
+	if commandTag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+
+	return nil
+}
+
+func (store *Store) GetGitHubRepositoryAccess(
+	ctx context.Context,
+	repositoryID string,
+) (GitHubRepositoryAccess, error) {
+	var repository GitHubRepositoryAccess
+	err := store.pool.QueryRow(
+		ctx,
+		`
+		SELECT
+			r.id,
+			r.github_id,
+			r.owner,
+			r.name,
+			r.full_name,
+			p.id,
+			r.analysis_enabled,
+			r.sync_status,
+			r.last_synced_at,
+			r.sync_failure_reason
+		FROM repositories r
+		LEFT JOIN projects p ON p.repository_id = r.id
+		WHERE r.id = $1
+		`,
+		repositoryID,
+	).Scan(
+		&repository.ID,
+		&repository.GitHubID,
+		&repository.Owner,
+		&repository.Name,
+		&repository.FullName,
+		&repository.ProjectID,
+		&repository.AnalysisEnabled,
+		&repository.SyncStatus,
+		&repository.LastSyncedAt,
+		&repository.SyncFailureReason,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return GitHubRepositoryAccess{}, ErrNotFound
+	}
+	if err != nil {
+		return GitHubRepositoryAccess{}, fmt.Errorf("get github repository access: %w", err)
+	}
+
+	return repository, nil
+}
+
 func (store *Store) RecordGitHubEvent(
 	ctx context.Context,
 	input GitHubEventInput,
@@ -334,18 +605,33 @@ func (store *Store) RecordGitHubEvent(
 			repository_id,
 			delivery_id,
 			event_type,
+			github_object_type,
+			github_object_id,
+			normalized_summary,
 			payload,
 			occurred_at
 		)
-		VALUES ($1, $2, $3, $4, $5, $6)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 		ON CONFLICT (delivery_id) DO UPDATE
 		SET delivery_id = github_events.delivery_id
-		RETURNING id, repository_id, delivery_id, event_type, payload, (xmax = 0) AS inserted
+		RETURNING
+			id,
+			repository_id,
+			delivery_id,
+			event_type,
+			github_object_type,
+			github_object_id,
+			normalized_summary,
+			payload,
+			(xmax = 0) AS inserted
 		`,
 		eventID,
 		input.RepositoryID,
 		input.DeliveryID,
 		input.EventType,
+		input.GitHubObjectType,
+		input.GitHubObjectID,
+		input.NormalizedSummary,
 		input.Payload,
 		occurredAt,
 	).Scan(
@@ -353,6 +639,9 @@ func (store *Store) RecordGitHubEvent(
 		&event.RepositoryID,
 		&event.DeliveryID,
 		&event.EventType,
+		&event.GitHubObjectType,
+		&event.GitHubObjectID,
+		&event.NormalizedSummary,
 		&event.Payload,
 		&inserted,
 	)
@@ -362,6 +651,56 @@ func (store *Store) RecordGitHubEvent(
 
 	event.Duplicate = !inserted
 	return event, nil
+}
+
+func (store *Store) ListGitHubRepositoryEvents(
+	ctx context.Context,
+	repositoryID string,
+	eventType string,
+) ([]GitHubRepositoryEvent, error) {
+	rows, err := store.pool.Query(
+		ctx,
+		`
+		SELECT
+			id,
+			event_type,
+			github_object_type,
+			github_object_id,
+			normalized_summary,
+			payload
+		FROM github_events
+		WHERE repository_id = $1
+		  AND event_type = $2
+		ORDER BY occurred_at DESC, id DESC
+		`,
+		repositoryID,
+		eventType,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("query github repository events: %w", err)
+	}
+	defer rows.Close()
+
+	var events []GitHubRepositoryEvent
+	for rows.Next() {
+		var event GitHubRepositoryEvent
+		if err := rows.Scan(
+			&event.ID,
+			&event.EventType,
+			&event.GitHubObjectType,
+			&event.GitHubObjectID,
+			&event.NormalizedSummary,
+			&event.Payload,
+		); err != nil {
+			return nil, fmt.Errorf("scan github repository event: %w", err)
+		}
+		events = append(events, event)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate github repository events: %w", err)
+	}
+
+	return events, nil
 }
 
 func (store *Store) AssessProjectRisk(ctx context.Context, projectID string) (ProjectRisk, error) {
@@ -397,9 +736,11 @@ func (store *Store) ListProjectsByRisk(ctx context.Context) ([]ProjectSummary, e
 	rows, err := store.pool.Query(
 		ctx,
 		`
-		SELECT id, name
-		FROM projects
-		ORDER BY created_at ASC, id ASC
+		SELECT p.id, p.name
+		FROM projects p
+		JOIN repositories r ON r.id = p.repository_id
+		WHERE r.analysis_enabled
+		ORDER BY p.created_at ASC, p.id ASC
 		`,
 	)
 	if err != nil {
@@ -437,7 +778,12 @@ func (store *Store) repositoryIDForProject(ctx context.Context, projectID string
 	var repositoryID string
 	if err := store.pool.QueryRow(
 		ctx,
-		`SELECT repository_id FROM projects WHERE id = $1`,
+		`
+		SELECT p.repository_id
+		FROM projects p
+		JOIN repositories r ON r.id = p.repository_id
+		WHERE p.id = $1 AND r.analysis_enabled
+		`,
 		projectID,
 	).Scan(&repositoryID); err != nil {
 		return "", fmt.Errorf("load project repository: %w", err)
@@ -836,7 +1182,13 @@ func (store *Store) evidenceEvents(
 	rows, err := store.pool.Query(
 		ctx,
 		`
-		SELECT id, event_type, payload
+		SELECT
+			id,
+			event_type,
+			github_object_type,
+			github_object_id,
+			normalized_summary,
+			payload
 		FROM github_events
 		WHERE id = ANY($1::text[])
 		   OR (
@@ -856,7 +1208,14 @@ func (store *Store) evidenceEvents(
 	var events []EvidenceEvent
 	for rows.Next() {
 		var event EvidenceEvent
-		if err := rows.Scan(&event.ID, &event.EventType, &event.Payload); err != nil {
+		if err := rows.Scan(
+			&event.ID,
+			&event.EventType,
+			&event.GitHubObjectType,
+			&event.GitHubObjectID,
+			&event.NormalizedSummary,
+			&event.Payload,
+		); err != nil {
 			return nil, fmt.Errorf("scan evidence event: %w", err)
 		}
 		events = append(events, event)

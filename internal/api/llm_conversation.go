@@ -75,6 +75,10 @@ func (server server) buildAgentConversationReply(
 
 	classification := classifyConversationIntent(userMessage)
 
+	if classification.Intent == "github_repository_list" {
+		return server.githubRepositoryListConversationReply(ctx)
+	}
+
 	if !classification.RequiresEvidence {
 		return agentConversationReply{
 			AgentResponse: replyWithoutEvidence(classification),
@@ -300,6 +304,37 @@ func fallbackProjectStatusReply(bundle db.EvidenceBundle) string {
 	)
 }
 
+func (server server) githubRepositoryListConversationReply(
+	ctx context.Context,
+) (agentConversationReply, error) {
+	repositories, err := server.store.ListGitHubRepositoryAccess(ctx)
+	if err != nil {
+		return agentConversationReply{}, err
+	}
+	if len(repositories) == 0 {
+		return agentConversationReply{
+			AgentResponse: "当前还没有 GitHub 授权，或没有发现可访问的 GitHub 仓库。请先在 GitHub 设置里完成授权并同步仓库。",
+			Intent:        "github_repository_list",
+		}, nil
+	}
+
+	names := make([]string, 0, len(repositories))
+	for _, repository := range repositories {
+		names = append(names, repository.FullName)
+	}
+	return agentConversationReply{
+		AgentResponse: "我当前能看到你授权给 Dev Time 的 GitHub 项目：" + strings.Join(names, "、"),
+		Intent:        "github_repository_list",
+		ToolCalls: []map[string]any{
+			{
+				"name":          "github.repos.list",
+				"status":        "succeeded",
+				"evidence_refs": []string{},
+			},
+		},
+	}, nil
+}
+
 func selfIntroductionReply() string {
 	return "我是 Dev Time Agent，定位是项目风险驱动助手。我会围绕项目、PR、测试、CI 和交付阻塞来识别风险、解释证据、生成行动计划，并在需要执行工具前请求确认。"
 }
@@ -363,6 +398,14 @@ func classifyConversationIntent(message string) conversationIntentClassification
 			}
 		}
 	}
+	if isGitHubRepositoryAccessQuestion(normalized) {
+		return conversationIntentClassification{
+			Intent:           "github_repository_list",
+			Confidence:       0.9,
+			RequiresEvidence: false,
+			RequiresTool:     true,
+		}
+	}
 	for _, keyword := range []string{"介绍", "你是谁", "你能做什么", "自我介绍"} {
 		if strings.Contains(normalized, keyword) {
 			return conversationIntentClassification{
@@ -396,6 +439,26 @@ func classifyConversationIntent(message string) conversationIntentClassification
 		RequiresEvidence:   false,
 		ClarifyingQuestion: "你想让我评估当前风险、解释证据，还是生成下一步行动计划？",
 	}
+}
+
+func isGitHubRepositoryAccessQuestion(normalized string) bool {
+	mentionsGitHub := strings.Contains(normalized, "github") ||
+		strings.Contains(normalized, "git hub")
+	mentionsRepository := false
+	for _, keyword := range []string{"项目", "仓库", "repo", "repository", "代码库"} {
+		if strings.Contains(normalized, keyword) {
+			mentionsRepository = true
+			break
+		}
+	}
+	asksVisibility := false
+	for _, keyword := range []string{"查看", "看到", "访问", "有哪些", "什么", "列表", "能看", "可见"} {
+		if strings.Contains(normalized, keyword) {
+			asksVisibility = true
+			break
+		}
+	}
+	return mentionsGitHub && mentionsRepository && asksVisibility
 }
 
 func formatRiskLevel(level string) string {

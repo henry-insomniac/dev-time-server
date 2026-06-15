@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -60,6 +61,12 @@ func NewRouter(dependencies ...Dependencies) http.Handler {
 	router.Get("/api/projects/{projectID}/risk", server.handleProjectRisk)
 	router.Get("/api/projects/{projectID}/action-suggestions", server.handleProjectActionSuggestions)
 	router.Get("/api/projects/{projectID}/agent-runs", server.handleProjectAgentRuns)
+	router.Get("/api/risk-assessments/{assessmentID}/evidence-bundle", server.handleEvidenceBundle)
+	router.Get("/api/settings/github", server.handleGitHubSettings)
+	router.Post("/api/settings/github/repositories/discover", server.handleDiscoverGitHubRepositories)
+	router.Patch("/api/settings/github/repositories/{repositoryID}/analysis", server.handleSetGitHubRepositoryAnalysis)
+	router.Post("/api/settings/github/repositories/{repositoryID}/load-project", server.handleLoadGitHubRepositoryProject)
+	router.Post("/api/settings/github/repositories/{repositoryID}/sync", server.handleTriggerGitHubRepositorySync)
 	router.Get("/api/settings/llm-providers", server.handleListLLMProviders)
 	router.Post("/api/settings/llm-providers", server.handleSaveLLMProvider)
 	router.Get(
@@ -78,6 +85,20 @@ func NewRouter(dependencies ...Dependencies) http.Handler {
 		"/internal/risk-assessments/{assessmentID}/pull-requests",
 		server.handleInternalPullRequests,
 	)
+	router.Get("/internal/github/auth-status", server.handleInternalGitHubAuthStatus)
+	router.Get("/internal/github/repositories", server.handleInternalGitHubRepositories)
+	router.Get(
+		"/internal/github/repositories/{repositoryID}/pull-requests",
+		server.handleInternalGitHubRepositoryPullRequests,
+	)
+	router.Get(
+		"/internal/github/repositories/{repositoryID}/issues",
+		server.handleInternalGitHubRepositoryIssues,
+	)
+	router.Get(
+		"/internal/github/repositories/{repositoryID}/checks",
+		server.handleInternalGitHubRepositoryChecks,
+	)
 	router.Post("/internal/action-suggestions", server.handleInternalCreateActionSuggestion)
 	router.Get("/api/projects/{projectID}/agent-conversation", server.handleAgentConversation)
 	router.Post("/api/agent-conversations/{conversationID}/turns", server.handleAgentConversationTurn)
@@ -95,7 +116,7 @@ func localDevCORS(next http.Handler) http.Handler {
 		if origin == "http://localhost:5173" || origin == "http://127.0.0.1:5173" {
 			response.Header().Set("Access-Control-Allow-Origin", origin)
 			response.Header().Set("Vary", "Origin")
-			response.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+			response.Header().Set("Access-Control-Allow-Methods", "GET, POST, PATCH, OPTIONS")
 			response.Header().Set("Access-Control-Allow-Headers", "Content-Type")
 		}
 		if request.Method == http.MethodOptions {
@@ -267,17 +288,32 @@ func (server server) handleGitHubWebhook(response http.ResponseWriter, request *
 	}
 
 	event, err := server.store.RecordGitHubEvent(request.Context(), db.GitHubEventInput{
-		RepositoryID: imported.Repository.ID,
-		DeliveryID:   deliveryID,
-		EventType:    eventType,
-		Payload:      rawPayload,
-		OccurredAt:   time.Now().UTC(),
+		RepositoryID:      imported.Repository.ID,
+		DeliveryID:        deliveryID,
+		EventType:         eventType,
+		GitHubObjectType:  normalizedGitHubObjectType(eventType),
+		GitHubObjectID:    normalizedGitHubObjectID(eventType, rawPayload),
+		NormalizedSummary: normalizedGitHubSummary(eventType, rawPayload),
+		Payload:           rawPayload,
+		OccurredAt:        time.Now().UTC(),
 	})
 	if err != nil {
 		writeJSON(response, http.StatusInternalServerError, map[string]string{
 			"error": "record github event failed",
 		})
 		return
+	}
+	if !event.Duplicate {
+		if err := server.store.MarkRepositorySyncSucceeded(
+			request.Context(),
+			imported.Repository.ID,
+			time.Now().UTC(),
+		); err != nil {
+			writeJSON(response, http.StatusInternalServerError, map[string]string{
+				"error": "mark repository sync succeeded failed",
+			})
+			return
+		}
 	}
 
 	statusCode := http.StatusAccepted
@@ -304,6 +340,82 @@ func isSupportedGitHubEvent(eventType string) bool {
 		return true
 	default:
 		return false
+	}
+}
+
+func normalizedGitHubObjectType(eventType string) string {
+	return eventType
+}
+
+func normalizedGitHubObjectID(eventType string, rawPayload []byte) string {
+	switch eventType {
+	case "check_run":
+		var payload struct {
+			CheckRun struct {
+				ID int64 `json:"id"`
+			} `json:"check_run"`
+		}
+		if err := json.Unmarshal(rawPayload, &payload); err != nil || payload.CheckRun.ID == 0 {
+			return ""
+		}
+		return strconv.FormatInt(payload.CheckRun.ID, 10)
+	case "pull_request":
+		var payload struct {
+			PullRequest struct {
+				Number int64 `json:"number"`
+			} `json:"pull_request"`
+		}
+		if err := json.Unmarshal(rawPayload, &payload); err != nil || payload.PullRequest.Number == 0 {
+			return ""
+		}
+		return strconv.FormatInt(payload.PullRequest.Number, 10)
+	default:
+		return ""
+	}
+}
+
+func normalizedGitHubSummary(eventType string, rawPayload []byte) string {
+	switch eventType {
+	case "check_run":
+		var payload struct {
+			CheckRun struct {
+				Name       string `json:"name"`
+				Status     string `json:"status"`
+				Conclusion string `json:"conclusion"`
+			} `json:"check_run"`
+		}
+		if err := json.Unmarshal(rawPayload, &payload); err != nil {
+			return ""
+		}
+		name := strings.TrimSpace(payload.CheckRun.Name)
+		status := strings.TrimSpace(payload.CheckRun.Status)
+		conclusion := strings.TrimSpace(payload.CheckRun.Conclusion)
+		if name == "" || status == "" || conclusion == "" {
+			return ""
+		}
+		return "Check run " + name + " " + status + " with " + conclusion
+	case "pull_request":
+		var payload struct {
+			Action      string `json:"action"`
+			PullRequest struct {
+				Number int64  `json:"number"`
+				Title  string `json:"title"`
+			} `json:"pull_request"`
+		}
+		if err := json.Unmarshal(rawPayload, &payload); err != nil {
+			return ""
+		}
+		title := strings.TrimSpace(payload.PullRequest.Title)
+		action := strings.TrimSpace(payload.Action)
+		if payload.PullRequest.Number == 0 || title == "" {
+			return ""
+		}
+		if action == "" {
+			return "Pull request #" + strconv.FormatInt(payload.PullRequest.Number, 10) + ": " + title
+		}
+		return "Pull request #" + strconv.FormatInt(payload.PullRequest.Number, 10) + " " + action + ": " + title
+	default:
+		return ""
 	}
 }
 

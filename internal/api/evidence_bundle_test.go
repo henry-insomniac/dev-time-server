@@ -42,6 +42,7 @@ func TestEvidenceBundleIncludesRiskSignalsAndReferencedEvents(t *testing.T) {
 				"full_name": "henry-insomniac/dev-time",
 				"owner": { "login": "henry-insomniac" }
 			},
+			"action": "opened",
 			"pull_request": {
 				"number": 18,
 				"title": "Add agent job completion"
@@ -103,8 +104,11 @@ func TestEvidenceBundleIncludesRiskSignalsAndReferencedEvents(t *testing.T) {
 			EvidenceRefs []string `json:"evidence_refs"`
 		} `json:"signals"`
 		Events []struct {
-			ID        string `json:"id"`
-			EventType string `json:"event_type"`
+			ID                string `json:"id"`
+			EventType         string `json:"event_type"`
+			GitHubObjectType  string `json:"github_object_type"`
+			GitHubObjectID    string `json:"github_object_id"`
+			NormalizedSummary string `json:"normalized_summary"`
 		} `json:"events"`
 		AllowedActions []string `json:"allowed_actions"`
 	}
@@ -127,20 +131,69 @@ func TestEvidenceBundleIncludesRiskSignalsAndReferencedEvents(t *testing.T) {
 	if !hasEvidenceEvent(bundle.Events, "event_check-run-evidence-1", "check_run") {
 		t.Fatalf("expected referenced check run event in bundle, got %#v", bundle.Events)
 	}
+	if !hasNormalizedEvidenceEvent(
+		bundle.Events,
+		"event_check-run-evidence-1",
+		"check_run",
+		"421",
+		"Check run test completed with failure",
+	) {
+		t.Fatalf("expected normalized check run evidence event, got %#v", bundle.Events)
+	}
 	if !hasEvidenceEvent(bundle.Events, "event_pull-request-evidence-1", "pull_request") {
 		t.Fatalf("expected related pull request event in bundle, got %#v", bundle.Events)
+	}
+	if !hasNormalizedEvidenceEvent(
+		bundle.Events,
+		"event_pull-request-evidence-1",
+		"pull_request",
+		"18",
+		"Pull request #18 opened: Add agent job completion",
+	) {
+		t.Fatalf("expected normalized pull request evidence event, got %#v", bundle.Events)
 	}
 	if len(bundle.AllowedActions) == 0 {
 		t.Fatal("expected allowed actions in evidence bundle")
 	}
+
+	publicBundleResponse := performJSONRequest(
+		router,
+		http.MethodGet,
+		"/api/risk-assessments/"+riskBody.Assessment.ID+"/evidence-bundle",
+		nil,
+	)
+	if publicBundleResponse.Code != http.StatusOK {
+		t.Fatalf("expected public evidence bundle status 200, got %d: %s", publicBundleResponse.Code, publicBundleResponse.Body.String())
+	}
 }
 
 func hasEvidenceEvent(events []struct {
-	ID        string `json:"id"`
-	EventType string `json:"event_type"`
+	ID                string `json:"id"`
+	EventType         string `json:"event_type"`
+	GitHubObjectType  string `json:"github_object_type"`
+	GitHubObjectID    string `json:"github_object_id"`
+	NormalizedSummary string `json:"normalized_summary"`
 }, id string, eventType string) bool {
 	for _, event := range events {
 		if event.ID == id && event.EventType == eventType {
+			return true
+		}
+	}
+	return false
+}
+
+func hasNormalizedEvidenceEvent(events []struct {
+	ID                string `json:"id"`
+	EventType         string `json:"event_type"`
+	GitHubObjectType  string `json:"github_object_type"`
+	GitHubObjectID    string `json:"github_object_id"`
+	NormalizedSummary string `json:"normalized_summary"`
+}, id string, objectType string, objectID string, summary string) bool {
+	for _, event := range events {
+		if event.ID == id &&
+			event.GitHubObjectType == objectType &&
+			event.GitHubObjectID == objectID &&
+			event.NormalizedSummary == summary {
 			return true
 		}
 	}

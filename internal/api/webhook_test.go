@@ -81,6 +81,75 @@ func TestGitHubWebhookRecordsUnsupportedEventAsIgnored(t *testing.T) {
 	}
 }
 
+func TestGitHubWebhookMarksRepositorySyncSucceeded(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	store := testsupport.NewMigratedStore(t, ctx)
+	router := api.NewRouter(api.Dependencies{Store: store})
+	importProject(t, router, 1001, "dev-time-server")
+
+	syncResponse := performJSONRequest(
+		router,
+		http.MethodPost,
+		"/api/settings/github/repositories/repo_1001/sync",
+		nil,
+	)
+	if syncResponse.Code != http.StatusAccepted {
+		t.Fatalf("expected trigger repository sync 202, got %d: %s", syncResponse.Code, syncResponse.Body.String())
+	}
+
+	webhookResponse := performWebhookRequest(
+		router,
+		"repo-sync-check-run-1",
+		"check_run",
+		[]byte(`{
+			"repository": {
+				"id": 1001,
+				"name": "dev-time-server",
+				"full_name": "henry-insomniac/dev-time-server",
+				"owner": { "login": "henry-insomniac" }
+			},
+			"check_run": {
+				"id": 421,
+				"name": "test",
+				"status": "completed",
+				"conclusion": "success"
+			}
+		}`),
+	)
+	if webhookResponse.Code != http.StatusAccepted {
+		t.Fatalf("expected webhook status 202, got %d: %s", webhookResponse.Code, webhookResponse.Body.String())
+	}
+
+	settingsResponse := performJSONRequest(
+		router,
+		http.MethodGet,
+		"/api/settings/github",
+		nil,
+	)
+	if settingsResponse.Code != http.StatusOK {
+		t.Fatalf("expected github settings 200, got %d: %s", settingsResponse.Code, settingsResponse.Body.String())
+	}
+
+	var body struct {
+		Repositories []struct {
+			ID           string  `json:"id"`
+			SyncStatus   string  `json:"sync_status"`
+			LastSyncedAt *string `json:"last_synced_at"`
+		} `json:"repositories"`
+	}
+	if err := json.NewDecoder(settingsResponse.Body).Decode(&body); err != nil {
+		t.Fatalf("decode github settings: %v", err)
+	}
+	if len(body.Repositories) != 1 ||
+		body.Repositories[0].ID != "repo_1001" ||
+		body.Repositories[0].SyncStatus != "succeeded" ||
+		body.Repositories[0].LastSyncedAt == nil {
+		t.Fatalf("expected repository sync succeeded in settings, got %#v", body.Repositories)
+	}
+}
+
 func performWebhookRequest(
 	handler http.Handler,
 	deliveryID string,

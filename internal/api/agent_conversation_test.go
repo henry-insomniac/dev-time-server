@@ -144,6 +144,140 @@ func TestAgentConversationTurnHandlesGreetingWithoutRiskEvidence(t *testing.T) {
 	}
 }
 
+func TestAgentConversationTurnListsGitHubRepositoriesWithoutRuntime(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	store := testsupport.NewMigratedStore(t, ctx)
+	router := api.NewRouter(api.Dependencies{Store: store})
+
+	projectID, assessmentID := createProjectRisk(t, router)
+
+	conversationResponse := performJSONRequest(
+		router,
+		http.MethodGet,
+		"/api/projects/"+projectID+"/agent-conversation?risk_assessment_id="+assessmentID,
+		nil,
+	)
+	if conversationResponse.Code != http.StatusOK {
+		t.Fatalf("expected conversation status 200, got %d: %s", conversationResponse.Code, conversationResponse.Body.String())
+	}
+
+	var conversation struct {
+		ID string `json:"id"`
+	}
+	if err := json.NewDecoder(conversationResponse.Body).Decode(&conversation); err != nil {
+		t.Fatalf("decode conversation response: %v", err)
+	}
+
+	turnResponse := performJSONRequest(
+		router,
+		http.MethodPost,
+		"/api/agent-conversations/"+conversation.ID+"/turns",
+		[]byte(`{
+			"message": "查看我的 github 项目",
+			"risk_assessment_id": "`+assessmentID+`"
+		}`),
+	)
+	if turnResponse.Code != http.StatusCreated {
+		t.Fatalf("expected turn status 201, got %d: %s", turnResponse.Code, turnResponse.Body.String())
+	}
+
+	var turn struct {
+		AgentResponse string   `json:"agent_response"`
+		EvidenceRefs  []string `json:"evidence_refs"`
+		Intent        string   `json:"intent"`
+	}
+	if err := json.NewDecoder(turnResponse.Body).Decode(&turn); err != nil {
+		t.Fatalf("decode turn response: %v", err)
+	}
+	if turn.Intent != "github_repository_list" {
+		t.Fatalf("expected github_repository_list intent, got %q", turn.Intent)
+	}
+	if !strings.Contains(turn.AgentResponse, "henry-insomniac/dev-time") {
+		t.Fatalf("expected github repository list, got %q", turn.AgentResponse)
+	}
+	if strings.Contains(turn.AgentResponse, "评估当前风险") {
+		t.Fatalf("expected github answer instead of risk clarification, got %q", turn.AgentResponse)
+	}
+	if len(turn.EvidenceRefs) != 0 {
+		t.Fatalf("expected no risk evidence refs, got %#v", turn.EvidenceRefs)
+	}
+}
+
+func TestAgentConversationTurnListsAllGitHubRepositoriesWithoutRuntime(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	store := testsupport.NewMigratedStore(t, ctx)
+	router := api.NewRouter(api.Dependencies{Store: store})
+
+	projectID, assessmentID := createProjectRisk(t, router)
+	discoverResponse := performJSONRequest(
+		router,
+		http.MethodPost,
+		"/api/settings/github/repositories/discover",
+		[]byte(`{
+			"repositories": [
+				{
+					"github_id": 1002,
+					"owner": "henry-insomniac",
+					"name": "dev-time-agent",
+					"full_name": "henry-insomniac/dev-time-agent"
+				}
+			]
+		}`),
+	)
+	if discoverResponse.Code != http.StatusOK {
+		t.Fatalf("expected discover repositories 200, got %d: %s", discoverResponse.Code, discoverResponse.Body.String())
+	}
+
+	conversationResponse := performJSONRequest(
+		router,
+		http.MethodGet,
+		"/api/projects/"+projectID+"/agent-conversation?risk_assessment_id="+assessmentID,
+		nil,
+	)
+	if conversationResponse.Code != http.StatusOK {
+		t.Fatalf("expected conversation status 200, got %d: %s", conversationResponse.Code, conversationResponse.Body.String())
+	}
+
+	var conversation struct {
+		ID string `json:"id"`
+	}
+	if err := json.NewDecoder(conversationResponse.Body).Decode(&conversation); err != nil {
+		t.Fatalf("decode conversation response: %v", err)
+	}
+
+	turnResponse := performJSONRequest(
+		router,
+		http.MethodPost,
+		"/api/agent-conversations/"+conversation.ID+"/turns",
+		[]byte(`{
+			"message": "查看我的 github 项目",
+			"risk_assessment_id": "`+assessmentID+`"
+		}`),
+	)
+	if turnResponse.Code != http.StatusCreated {
+		t.Fatalf("expected turn status 201, got %d: %s", turnResponse.Code, turnResponse.Body.String())
+	}
+
+	var turn struct {
+		AgentResponse string `json:"agent_response"`
+		Intent        string `json:"intent"`
+	}
+	if err := json.NewDecoder(turnResponse.Body).Decode(&turn); err != nil {
+		t.Fatalf("decode turn response: %v", err)
+	}
+	if turn.Intent != "github_repository_list" {
+		t.Fatalf("expected github_repository_list intent, got %q", turn.Intent)
+	}
+	if !strings.Contains(turn.AgentResponse, "henry-insomniac/dev-time") ||
+		!strings.Contains(turn.AgentResponse, "henry-insomniac/dev-time-agent") {
+		t.Fatalf("expected all github repositories, got %q", turn.AgentResponse)
+	}
+}
+
 func TestAgentConversationTurnIntroducesItselfWithoutRiskEvidence(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()

@@ -34,7 +34,29 @@
 
 ## 修复记录
 
-暂无已记录 bug。
+## 2026-06-15 - 未配置 Agent Runtime 时 GitHub 项目查询被误判为澄清
+
+### 现象
+
+用户在前端 Agent dock 输入“查看我的 github 项目”时，如果 `dev-time-server` 没有配置 `AgentRuntimeBaseURL` 或 runtime 调用不可用，server fallback 会返回“你想让我评估当前风险、解释证据，还是生成下一步行动计划？”，意图为 `clarify`。
+
+### 影响
+
+影响 GitHub 项目查看和授权状态确认流程。即使 server 已经有 GitHub repository 数据，用户仍无法通过 Agent dock 查看已授权项目。
+
+### 原因
+
+`dev-time-server` 自身的 fallback conversation classifier 没有识别 GitHub 仓库访问类问题，只覆盖普通问候、自我介绍、项目状态、风险解释和行动计划。当前端没有走 `dev-time-agent` runtime 时，GitHub 项目请求直接落入 `clarify`。
+
+### 修复
+
+在 `llm_conversation.go` 增加 `github_repository_list` 意图识别，并在 fallback conversation 路径中通过 `ListGitHubRepositoryAccess` 返回当前已发现/授权的全部 GitHub 仓库列表，不再只返回 `analysis_enabled=true` 的风险分析仓库。无仓库时返回明确的 GitHub 授权/同步提示，不再返回风险澄清文案。
+
+### 验证
+
+- `go test ./internal/api -run TestAgentConversationTurnListsGitHubRepositoriesWithoutRuntime -count=1`
+- `go test ./internal/api -run TestAgentConversationTurnListsAllGitHubRepositoriesWithoutRuntime -count=1`
+- `go test ./...`
 
 ## 已知风险
 

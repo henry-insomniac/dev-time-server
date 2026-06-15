@@ -94,3 +94,42 @@ func TestProjectRiskReportsFailedCheckRunAsBlockingRisk(t *testing.T) {
 		t.Fatalf("expected failed check run evidence ref, got %#v", body.Signals[0].EvidenceRefs)
 	}
 }
+
+func TestProjectRiskExcludesDisabledAnalysisRepository(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	store := testsupport.NewMigratedStore(t, ctx)
+	router := api.NewRouter(api.Dependencies{Store: store})
+
+	importResponse := performJSONRequest(
+		router,
+		http.MethodPost,
+		"/api/github/repositories/import",
+		[]byte(`{
+			"github_id": 1001,
+			"owner": "henry-insomniac",
+			"name": "dev-time",
+			"full_name": "henry-insomniac/dev-time"
+		}`),
+	)
+	if importResponse.Code != http.StatusCreated {
+		t.Fatalf("expected import status 201, got %d: %s", importResponse.Code, importResponse.Body.String())
+	}
+	projectID := decodeProjectID(t, importResponse)
+
+	toggleResponse := performJSONRequest(
+		router,
+		http.MethodPatch,
+		"/api/settings/github/repositories/repo_1001/analysis",
+		[]byte(`{"analysis_enabled": false}`),
+	)
+	if toggleResponse.Code != http.StatusOK {
+		t.Fatalf("expected toggle analysis status 200, got %d: %s", toggleResponse.Code, toggleResponse.Body.String())
+	}
+
+	riskResponse := performJSONRequest(router, http.MethodGet, "/api/projects/"+projectID+"/risk", nil)
+	if riskResponse.Code != http.StatusNotFound {
+		t.Fatalf("expected disabled repository risk status 404, got %d: %s", riskResponse.Code, riskResponse.Body.String())
+	}
+}

@@ -10,6 +10,7 @@ func TestLoadUsesConfiguredServerAddress(t *testing.T) {
 	t.Setenv("DEV_TIME_SERVER_ADDR", "127.0.0.1:18080")
 	t.Setenv("DATABASE_URL", "postgres://custom:custom@localhost:5432/custom")
 	t.Setenv("DEV_TIME_AGENT_RUNTIME_BASE_URL", "http://127.0.0.1:8000")
+	t.Setenv("DEV_TIME_ALLOW_NO_DATABASE", "true")
 
 	loaded := config.Load()
 
@@ -22,12 +23,16 @@ func TestLoadUsesConfiguredServerAddress(t *testing.T) {
 	if loaded.AgentRuntimeBaseURL != "http://127.0.0.1:8000" {
 		t.Fatalf("expected configured agent runtime base url, got %q", loaded.AgentRuntimeBaseURL)
 	}
+	if !loaded.AllowNoDatabase {
+		t.Fatal("expected no database dev mode to be enabled")
+	}
 }
 
 func TestLoadUsesDefaultServerAddress(t *testing.T) {
 	t.Setenv("DEV_TIME_SERVER_ADDR", "")
 	t.Setenv("DATABASE_URL", "")
 	t.Setenv("DEV_TIME_AGENT_RUNTIME_BASE_URL", "")
+	t.Setenv("DEV_TIME_ALLOW_NO_DATABASE", "")
 
 	loaded := config.Load()
 
@@ -39,5 +44,8 @@ func TestLoadUsesDefaultServerAddress(t *testing.T) {
 	}
 	if loaded.AgentRuntimeBaseURL != "" {
 		t.Fatalf("expected empty default agent runtime base url, got %q", loaded.AgentRuntimeBaseURL)
+	}
+	if loaded.AllowNoDatabase {
+		t.Fatal("expected no database dev mode to be disabled by default")
 	}
 }

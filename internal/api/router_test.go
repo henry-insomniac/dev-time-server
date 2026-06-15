@@ -52,3 +52,36 @@ func TestRouterAllowsLocalDevCORS(t *testing.T) {
 		t.Fatal("expected allowed methods header")
 	}
 }
+
+func TestGitHubSettingsWithoutStoreReportsDisconnected(t *testing.T) {
+	request := httptest.NewRequest(http.MethodGet, "/api/settings/github", nil)
+	response := httptest.NewRecorder()
+
+	api.NewRouter().ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("expected github settings status 200, got %d: %s", response.Code, response.Body.String())
+	}
+
+	var body struct {
+		Connected     bool     `json:"connected"`
+		Provider      string   `json:"provider"`
+		Repositories  []string `json:"repositories"`
+		StorageStatus string   `json:"storage_status"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&body); err != nil {
+		t.Fatalf("decode github settings response: %v", err)
+	}
+	if body.Connected {
+		t.Fatalf("expected disconnected github settings without store, got %#v", body)
+	}
+	if body.Provider != "github_app" {
+		t.Fatalf("expected github_app provider, got %q", body.Provider)
+	}
+	if len(body.Repositories) != 0 {
+		t.Fatalf("expected no repositories without store, got %#v", body.Repositories)
+	}
+	if body.StorageStatus != "unavailable" {
+		t.Fatalf("expected unavailable storage status, got %q", body.StorageStatus)
+	}
+}

@@ -64,7 +64,10 @@
 │   │   ├── migrations/
 │   │   │   ├── 0001_initial.sql
 │   │   │   ├── 0002_llm_provider_configs.sql
-│   │   │   └── 0003_agent_conversations.sql
+│   │   │   ├── 0003_agent_conversations.sql
+│   │   │   ├── 0008_repository_analysis_state.sql
+│   │   │   ├── 0009_repository_sync_state.sql
+│   │   │   └── 0010_github_event_normalized_metadata.sql
 │   │   ├── migrations.go
 │   │   ├── store.go
 │   │   └── store_test.go
@@ -112,16 +115,16 @@ Dev Time 跨端技术架构。定义 GitHub 事实源、事件流、风险引擎
 
 ### `cmd/dev-time-server/`
 
-后端服务入口。当前启动 HTTP server，并挂载 `GET /healthz`。
+后端服务入口。当前启动 HTTP server，并挂载 `GET /healthz`。默认必须连接 PostgreSQL 并完成 migration；本地前端联调可临时设置 `DEV_TIME_ALLOW_NO_DATABASE=true`，数据库不可用时仍启动 HTTP，`/api/settings/github` 返回未连接状态，避免前端出现网络层 `Failed to fetch`。
 
 ### `internal/`
 
 后端内部包目录。
 
-- `api/`：HTTP router 和 handler。当前包含 `GET /healthz`、`GET /api/projects`、`POST /api/github/repositories/import`、`POST /api/github/webhook`、`GET /api/projects/{projectID}/risk`、`GET /api/projects/{projectID}/action-suggestions`、`GET /api/settings/llm-providers`、`POST /api/settings/llm-providers`、`POST /api/risk-assessments/{assessmentID}/refresh-agent`、`GET /internal/llm-provider-config`、`POST /internal/agent-jobs/claim`、`POST /internal/agent-jobs/{jobID}/complete`、`GET /internal/risk-assessments/{assessmentID}/evidence-bundle`、`GET /api/projects/{projectID}/agent-conversation`、`POST /api/agent-conversations/{conversationID}/turns` 和 `POST /api/action-suggestions/{suggestionID}/confirm`。AgentJob completion 可在同一事务保存 AgentArtifact 和关联 ActionSuggestion，并返回 `action_suggestion_ids`。
+- `api/`：HTTP router 和 handler。当前包含 `GET /healthz`、`GET /api/projects`、`POST /api/github/repositories/import`、`POST /api/github/webhook`、`GET /api/projects/{projectID}/risk`、`GET /api/projects/{projectID}/action-suggestions`、`GET /api/settings/github`、`POST /api/settings/github/repositories/discover`、`POST /api/settings/github/repositories/{repositoryID}/load-project`、`PATCH /api/settings/github/repositories/{repositoryID}/analysis`、`POST /api/settings/github/repositories/{repositoryID}/sync`、`GET /api/settings/llm-providers`、`POST /api/settings/llm-providers`、`POST /api/risk-assessments/{assessmentID}/refresh-agent`、`GET /api/risk-assessments/{assessmentID}/evidence-bundle`、`GET /internal/llm-provider-config`、`POST /internal/agent-jobs/claim`、`POST /internal/agent-jobs/{jobID}/complete`、`GET /internal/risk-assessments/{assessmentID}/evidence-bundle`、`GET /api/projects/{projectID}/agent-conversation`、`POST /api/agent-conversations/{conversationID}/turns` 和 `POST /api/action-suggestions/{suggestionID}/confirm`。GitHub settings 现在区分 repository catalog 和 Dev Time project：发现到的授权仓库即使尚未加载为项目也会出现在 settings，只有调用 `load-project` 后才进入 `/api/projects` 和 Agent 工作台。GitHub webhook 会在落库时保存 `github_object_type`、`github_object_id` 和 `normalized_summary`；当前 `check_run` 和 `pull_request` 已生成稳定摘要，用于前端证据包和 Agent 证据追溯。AgentJob completion 可在同一事务保存 AgentArtifact 和关联 ActionSuggestion，并返回 `action_suggestion_ids`。
 - `buildinfo/`：服务标识和构建信息。
 - `config/`：环境变量配置读取。
-- `db/`：PostgreSQL migration runner、基础 store API、Event Store、RiskAssessment 持久化、AgentJob 队列、AgentRun / AgentStep 调查时间线、AgentArtifact 保存、LLM provider key 加密存储、AgentConversation / ActionSuggestion 持久化和容器化集成测试。
+- `db/`：PostgreSQL migration runner、基础 store API、Event Store、RiskAssessment 持久化、AgentJob 队列、AgentRun / AgentStep 调查时间线、AgentArtifact 保存、LLM provider key 加密存储、AgentConversation / ActionSuggestion 持久化和容器化集成测试。项目风险评估和 EvidenceBundle 读取会检查仓库 `analysis_enabled`，关闭分析的仓库不再返回可分析风险结果。
 - `testsupport/`：测试辅助能力。当前提供 PostgreSQL Testcontainers 启动、migration 和 Store 初始化。
 
 后续按 `github`、`risk`、`agentjobs`、`actionsuggestions` 等领域扩展。
@@ -158,7 +161,11 @@ Agent Tool internal API：
 - `GET /internal/risk-assessments/{assessmentID}/project-status`：提供项目风险分、等级、最高风险原因和证据引用。
 - `GET /internal/risk-assessments/{assessmentID}/ci-checks`：提供当前风险相关 check_run 摘要。
 - `GET /internal/risk-assessments/{assessmentID}/pull-requests`：提供当前风险相关 PR 摘要。
+- `GET /internal/github/auth-status`：提供 GitHub 授权/导入仓库可见状态、只读权限清单和可见仓库摘要。
+- `GET /internal/github/repositories`：提供 Agent 可读取的 GitHub 仓库与 Project 映射，仅返回用户已加载为项目且开启 `analysis_enabled` 的仓库。
 - `POST /internal/action-suggestions`：创建 `pending_user_confirmation` 行动草稿；确认前不执行外部 GitHub 写入。
+
+GitHub internal API 只向 Agent 暴露受控事实，不回传 installation token、OAuth token 或 PAT。GitHub 写操作必须继续走 ActionSuggestion 用户确认链路。
 
 ## 架构变更记录
 
@@ -184,3 +191,13 @@ Agent Tool internal API：
 | 2026-06-11 | 扩展 EvidenceBundle 相关事件 | Agent 可同时获取失败 check_run 和同仓库 pull_request 事件，用于 PR Doctor 草稿生成 | `go test ./...` |
 | 2026-06-11 | 增加 AgentRun / AgentStep 调查时间线 | AgentJob 生命周期可沉淀为可读的 Agent 主导风险调查过程 | `go test ./...` |
 | 2026-06-13 | 透传并保存 Agent reasoning trace | 前端需要按 turn 展示默认折叠的思考过程，同时保留工具调用和审批请求审计 | `go test ./...` |
+| 2026-06-13 | 增加 GitHub 只读 internal tools | Agent 需要在用户授权边界内读取 GitHub 可见仓库，不能直接接触 token 或编造访问状态 | `go test ./internal/api -run TestInternalGitHubAuthStatusReportsImportedRepositoryAccess -count=1` |
+| 2026-06-13 | 增加 GitHub settings 公开 API | 前端需要展示 GitHub 连接状态、权限和可见仓库 | `go test ./internal/api -run TestGitHubSettingsExposeConnectionStatus -count=1` |
+| 2026-06-15 | 增加仓库分析开关和同步状态字段 | 产品研发切到 GitHub 仓库选择闭环，用户需要选择哪些授权仓库进入风险分析，并看到基础同步状态 | `go test ./... -run '^$'` |
+| 2026-06-15 | 增加公开 EvidenceBundle 和 GitHub 事件标准化元数据 | 前端风险详情需要展示可解释证据链，Agent 也需要稳定事件摘要而不是直接解释 payload | `go test ./... -run '^$'` |
+| 2026-06-15 | Agent internal GitHub tools 过滤关闭分析的仓库 | 用户关闭仓库分析后，Agent 可读取仓库边界必须同步收紧 | `go test ./... -run '^$'` |
+| 2026-06-15 | 项目风险读取过滤关闭分析的仓库 | 用户关闭仓库分析后，直接 risk/evidence API 也不能继续返回可分析结果 | `go test ./... -run '^$'` |
+| 2026-06-15 | pull_request webhook 生成标准化事件摘要 | PR Doctor 和证据包需要稳定 PR 编号与摘要，不应依赖前端解析 payload | `go test ./... -run '^$'` |
+| 2026-06-15 | 增加无数据库本地开发启动模式 | 前端联调 GitHub 设置时，如果 Postgres 未启动，不应表现为 API 网络失败 | `go test ./internal/config ./internal/api -run 'TestLoad|TestHealthz|TestRouterAllowsLocalDevCORS|TestGitHubSettingsWithoutStoreReportsDisconnected' -count=1 && go test ./... -run '^$'` |
+| 2026-06-15 | 手动仓库同步完成本地状态闭环 | 当前阶段先让同步按钮完成 succeeded/last_synced_at 状态更新，真实 GitHub backfill worker 后续接入 | `go test ./internal/api -run TestGitHubSettingsCanTriggerRepositorySync -count=1 && go test ./... -run '^$'` |
+| 2026-06-15 | 拆分授权仓库目录和 Dev Time 项目加载 | GitHub 连接后需要看到全部授权仓库，并允许任意仓库加载为项目进入 Agent 工作台 | `go test ./internal/api -run 'TestGitHubSettingsListDiscoveredRepositoriesBeforeProjectLoad|TestGitHubSettingsCanLoadDiscoveredRepositoryAsProject|TestProjectsOnlyIncludeLoadedGitHubRepositories' -count=1 && go test ./... -run '^$'` |
