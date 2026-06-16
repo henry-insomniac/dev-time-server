@@ -51,6 +51,9 @@ func (config GitHubAppConfig) withDefaults() GitHubAppConfig {
 	if config.InstallationBaseURL == "" {
 		config.InstallationBaseURL = "https://github.com"
 	}
+	if config.OAuthBaseURL == "" {
+		config.OAuthBaseURL = "https://github.com"
+	}
 	return config
 }
 

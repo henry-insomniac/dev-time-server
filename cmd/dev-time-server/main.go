@@ -50,6 +50,10 @@ func main() {
 				APIBaseURL:          loaded.GitHubAPIBaseURL,
 				InstallationBaseURL: loaded.GitHubInstallBaseURL,
 				FrontendBaseURL:     loaded.FrontendBaseURL,
+				OAuthClientID:       loaded.GitHubOAuthClientID,
+				OAuthClientSecret:   loaded.GitHubOAuthSecret,
+				OAuthBaseURL:        loaded.GitHubOAuthBaseURL,
+				WebhookSecret:       loaded.GitHubWebhookSecret,
 			},
 		}),
 	); err != nil {

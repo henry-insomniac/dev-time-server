@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -48,6 +49,7 @@ func (server server) handleInternalCIChecks(response http.ResponseWriter, reques
 		}
 		var payload struct {
 			CheckRun struct {
+				ID         int64  `json:"id"`
 				Name       string `json:"name"`
 				Status     string `json:"status"`
 				Conclusion string `json:"conclusion"`
@@ -62,6 +64,7 @@ func (server server) handleInternalCIChecks(response http.ResponseWriter, reques
 		}
 		checks = append(checks, internalCheckRun{
 			EvidenceRef: event.ID,
+			RunID:       payload.CheckRun.ID,
 			Name:        payload.CheckRun.Name,
 			Status:      payload.CheckRun.Status,
 			Conclusion:  payload.CheckRun.Conclusion,
@@ -388,9 +391,7 @@ func (server server) handleInternalGitHubRepositoryPullRequests(
 	if len(events) == 0 && server.githubApp.isConfigured() {
 		livePullRequests, err := server.liveGitHubPullRequests(request.Context(), repository)
 		if err != nil {
-			writeJSON(response, http.StatusBadGateway, map[string]string{
-				"error": "list live github pull requests failed",
-			})
+			writeGitHubLiveError(response, "list live github pull requests failed", err)
 			return
 		}
 		pullRequests = livePullRequests
@@ -443,9 +444,7 @@ func (server server) handleInternalGitHubRepositoryIssues(
 	if len(events) == 0 && server.githubApp.isConfigured() {
 		liveIssues, err := server.liveGitHubIssues(request.Context(), repository)
 		if err != nil {
-			writeJSON(response, http.StatusBadGateway, map[string]string{
-				"error": "list live github issues failed",
-			})
+			writeGitHubLiveError(response, "list live github issues failed", err)
 			return
 		}
 		issues = liveIssues
@@ -498,9 +497,7 @@ func (server server) handleInternalGitHubRepositoryChecks(
 	if len(events) == 0 && server.githubApp.isConfigured() {
 		liveChecks, err := server.liveGitHubChecks(request.Context(), repository)
 		if err != nil {
-			writeJSON(response, http.StatusBadGateway, map[string]string{
-				"error": "list live github checks failed",
-			})
+			writeGitHubLiveError(response, "list live github checks failed", err)
 			return
 		}
 		checks = liveChecks
@@ -533,6 +530,65 @@ func (server server) handleInternalGitHubRepositoryChecks(
 		Checks []internalCheckRun `json:"checks"`
 	}{
 		Checks: checks,
+	})
+}
+
+func (server server) handleInternalGitHubRepositoryCheckLogs(
+	response http.ResponseWriter,
+	request *http.Request,
+) {
+	if server.store == nil {
+		writeJSON(response, http.StatusServiceUnavailable, map[string]string{
+			"error": "repository store is not configured",
+		})
+		return
+	}
+
+	repositoryID := chi.URLParam(request, "repositoryID")
+	runID, err := strconv.ParseInt(chi.URLParam(request, "runID"), 10, 64)
+	if repositoryID == "" || err != nil || runID <= 0 {
+		writeJSON(response, http.StatusBadRequest, map[string]string{
+			"error": "repository id and run id are required",
+		})
+		return
+	}
+
+	repository, err := server.store.GetGitHubRepositoryAccess(request.Context(), repositoryID)
+	if err != nil {
+		status := http.StatusInternalServerError
+		message := "load github repository access failed"
+		if errors.Is(err, db.ErrNotFound) {
+			status = http.StatusNotFound
+			message = "github repository not found"
+		}
+		writeJSON(response, status, map[string]string{"error": message})
+		return
+	}
+	if !server.githubApp.isConfigured() {
+		writeJSON(response, http.StatusServiceUnavailable, map[string]string{
+			"error": "github app is not configured",
+		})
+		return
+	}
+
+	checkLogs, err := server.liveGitHubCheckLogs(request.Context(), repository, runID)
+	if err != nil {
+		writeGitHubLiveError(response, "read live github check logs failed", err)
+		return
+	}
+	writeJSON(response, http.StatusOK, checkLogs)
+}
+
+func writeGitHubLiveError(response http.ResponseWriter, message string, err error) {
+	if errors.Is(err, errGitHubRateLimited) {
+		writeJSON(response, http.StatusTooManyRequests, map[string]string{
+			"error_code": "github_rate_limited",
+			"error":      "GitHub API rate limit exceeded; please retry after the reset window.",
+		})
+		return
+	}
+	writeJSON(response, http.StatusBadGateway, map[string]string{
+		"error": message,
 	})
 }
 
@@ -723,10 +779,19 @@ func (server server) loadInternalEvidenceBundle(
 
 type internalCheckRun struct {
 	EvidenceRef string `json:"evidence_ref"`
+	RunID       int64  `json:"run_id,omitempty"`
 	Name        string `json:"name"`
 	Status      string `json:"status"`
 	Conclusion  string `json:"conclusion"`
 	URL         string `json:"url"`
+}
+
+type internalCheckLogExcerpt struct {
+	RunID        int64    `json:"run_id"`
+	CheckName    string   `json:"check_name"`
+	Conclusion   string   `json:"conclusion"`
+	LogExcerpt   string   `json:"log_excerpt"`
+	EvidenceRefs []string `json:"evidence_refs"`
 }
 
 type internalPullRequest struct {

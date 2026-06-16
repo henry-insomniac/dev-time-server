@@ -1,7 +1,11 @@
 package api
 
 import (
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"strconv"
@@ -27,6 +31,10 @@ type GitHubAppConfig struct {
 	APIBaseURL          string
 	FrontendBaseURL     string
 	InstallationBaseURL string
+	OAuthClientID       string
+	OAuthClientSecret   string
+	OAuthBaseURL        string
+	WebhookSecret       string
 }
 
 type server struct {
@@ -68,6 +76,9 @@ func NewRouter(dependencies ...Dependencies) http.Handler {
 	router := chi.NewRouter()
 	router.Use(localDevCORS)
 	router.Get("/healthz", handleHealthz)
+	router.Get("/api/auth/session", server.handleAuthSession)
+	router.Get("/api/auth/github/start", server.handleGitHubOAuthStart)
+	router.Get("/api/auth/github/callback", server.handleGitHubOAuthCallback)
 	router.Get("/api/github/installations/start", server.handleGitHubInstallationStart)
 	router.Get("/api/github/installations/callback", server.handleGitHubInstallationCallback)
 	router.Post("/api/github/repositories/import", server.handleImportRepository)
@@ -114,9 +125,14 @@ func NewRouter(dependencies ...Dependencies) http.Handler {
 		"/internal/github/repositories/{repositoryID}/checks",
 		server.handleInternalGitHubRepositoryChecks,
 	)
+	router.Get(
+		"/internal/github/repositories/{repositoryID}/checks/{runID}/logs",
+		server.handleInternalGitHubRepositoryCheckLogs,
+	)
 	router.Post("/internal/action-suggestions", server.handleInternalCreateActionSuggestion)
 	router.Get("/api/projects/{projectID}/agent-conversation", server.handleAgentConversation)
 	router.Post("/api/agent-conversations/{conversationID}/turns", server.handleAgentConversationTurn)
+	router.Post("/api/agent-conversations/{conversationID}/turns/stream", server.handleAgentConversationTurnStream)
 	router.Post("/api/action-suggestions/{suggestionID}/confirm", server.handleConfirmActionSuggestion)
 	router.Post("/api/risk-assessments/{assessmentID}/refresh-agent", server.handleRefreshAgent)
 	router.Get("/internal/llm-provider-config", server.handleInternalLLMProviderConfig)
@@ -131,6 +147,7 @@ func localDevCORS(next http.Handler) http.Handler {
 		if origin == "http://localhost:5173" || origin == "http://127.0.0.1:5173" {
 			response.Header().Set("Access-Control-Allow-Origin", origin)
 			response.Header().Set("Vary", "Origin")
+			response.Header().Set("Access-Control-Allow-Credentials", "true")
 			response.Header().Set("Access-Control-Allow-Methods", "GET, POST, PATCH, OPTIONS")
 			response.Header().Set("Access-Control-Allow-Headers", "Content-Type")
 		}
@@ -252,6 +269,17 @@ func (server server) handleGitHubWebhook(response http.ResponseWriter, request *
 		})
 		return
 	}
+	if !server.validGitHubWebhookSignature(request, rawPayload) {
+		writeJSON(response, http.StatusUnauthorized, map[string]string{
+			"error": "invalid github webhook signature",
+		})
+		return
+	}
+
+	if eventType == "installation" {
+		server.handleGitHubInstallationWebhook(response, request, deliveryID, rawPayload)
+		return
+	}
 
 	var payload struct {
 		Repository struct {
@@ -346,6 +374,67 @@ func (server server) handleGitHubWebhook(response http.ResponseWriter, request *
 	}{
 		EventID: event.ID,
 		Status:  status,
+	})
+}
+
+func (server server) validGitHubWebhookSignature(request *http.Request, rawPayload []byte) bool {
+	secret := strings.TrimSpace(server.githubApp.WebhookSecret)
+	if secret == "" {
+		return true
+	}
+	signature := strings.TrimSpace(request.Header.Get("X-Hub-Signature-256"))
+	if !strings.HasPrefix(signature, "sha256=") {
+		return false
+	}
+	expectedMAC := hmac.New(sha256.New, []byte(secret))
+	expectedMAC.Write(rawPayload)
+	expectedSignature := "sha256=" + hex.EncodeToString(expectedMAC.Sum(nil))
+	return hmac.Equal([]byte(expectedSignature), []byte(signature))
+}
+
+func (server server) handleGitHubInstallationWebhook(
+	response http.ResponseWriter,
+	request *http.Request,
+	deliveryID string,
+	rawPayload []byte,
+) {
+	var payload struct {
+		Action       string `json:"action"`
+		Repositories []struct {
+			GitHubID int64 `json:"id"`
+		} `json:"repositories"`
+	}
+	if err := json.Unmarshal(rawPayload, &payload); err != nil {
+		writeJSON(response, http.StatusBadRequest, map[string]string{
+			"error": "invalid JSON request body",
+		})
+		return
+	}
+	if payload.Action != "deleted" {
+		writeJSON(response, http.StatusAccepted, map[string]string{
+			"delivery_id": deliveryID,
+			"status":      "ignored",
+		})
+		return
+	}
+	for _, repository := range payload.Repositories {
+		if repository.GitHubID == 0 {
+			continue
+		}
+		if err := server.store.DisableRepositoryAnalysisByGitHubID(
+			request.Context(),
+			repository.GitHubID,
+			"github installation deleted",
+		); err != nil && !errors.Is(err, db.ErrNotFound) {
+			writeJSON(response, http.StatusInternalServerError, map[string]string{
+				"error": "disable github repository analysis failed",
+			})
+			return
+		}
+	}
+	writeJSON(response, http.StatusAccepted, map[string]string{
+		"delivery_id": deliveryID,
+		"status":      "installation_deleted",
 	})
 }
 
@@ -681,21 +770,55 @@ func (server server) handleAgentConversationTurn(response http.ResponseWriter, r
 	}
 
 	conversationID := chi.URLParam(request, "conversationID")
-	var input struct {
-		Message          string `json:"message"`
-		RiskAssessmentID string `json:"risk_assessment_id"`
+	turn, err := server.createAgentConversationTurn(request, conversationID)
+	if err != nil {
+		server.writeAgentConversationTurnError(response, err)
+		return
 	}
-	if err := json.NewDecoder(request.Body).Decode(&input); err != nil {
-		writeJSON(response, http.StatusBadRequest, map[string]string{
-			"error": "invalid JSON request body",
+
+	writeJSON(response, http.StatusCreated, turn)
+}
+
+func (server server) handleAgentConversationTurnStream(response http.ResponseWriter, request *http.Request) {
+	if server.store == nil {
+		writeJSON(response, http.StatusServiceUnavailable, map[string]string{
+			"error": "repository store is not configured",
 		})
 		return
+	}
+
+	conversationID := chi.URLParam(request, "conversationID")
+	turn, err := server.createAgentConversationTurn(request, conversationID)
+	if err != nil {
+		server.writeAgentConversationTurnError(response, err)
+		return
+	}
+
+	response.Header().Set("Content-Type", "text/event-stream")
+	response.Header().Set("Cache-Control", "no-cache")
+	response.WriteHeader(http.StatusCreated)
+	writeSSE(response, "delta", map[string]string{"text": turn.AgentResponse})
+	writeSSE(response, "turn", turn)
+}
+
+type agentConversationTurnInput struct {
+	Message          string `json:"message"`
+	RiskAssessmentID string `json:"risk_assessment_id"`
+}
+
+var errBadAgentConversationTurnRequest = errors.New("bad agent conversation turn request")
+var errAgentConversationReplyFailed = errors.New("agent conversation reply failed")
+
+func (server server) createAgentConversationTurn(
+	request *http.Request,
+	conversationID string,
+) (db.AgentConversationTurn, error) {
+	var input agentConversationTurnInput
+	if err := json.NewDecoder(request.Body).Decode(&input); err != nil {
+		return db.AgentConversationTurn{}, errBadAgentConversationTurnRequest
 	}
 	if conversationID == "" || input.Message == "" || input.RiskAssessmentID == "" {
-		writeJSON(response, http.StatusBadRequest, map[string]string{
-			"error": "conversation id, message, and risk_assessment_id are required",
-		})
-		return
+		return db.AgentConversationTurn{}, errBadAgentConversationTurnRequest
 	}
 
 	agentReply, err := server.buildAgentConversationReply(
@@ -705,10 +828,7 @@ func (server server) handleAgentConversationTurn(response http.ResponseWriter, r
 		input.Message,
 	)
 	if err != nil {
-		writeJSON(response, http.StatusBadGateway, map[string]string{
-			"error": "agent conversation llm response failed",
-		})
-		return
+		return db.AgentConversationTurn{}, errAgentConversationReplyFailed
 	}
 
 	turn, err := server.store.AddAgentConversationTurn(
@@ -726,13 +846,39 @@ func (server server) handleAgentConversationTurn(response http.ResponseWriter, r
 		agentReply.ReasoningTrace,
 	)
 	if err != nil {
-		writeJSON(response, http.StatusInternalServerError, map[string]string{
-			"error": "agent conversation turn failed",
+		return db.AgentConversationTurn{}, err
+	}
+	return turn, nil
+}
+
+func (server server) writeAgentConversationTurnError(response http.ResponseWriter, err error) {
+	if errors.Is(err, errBadAgentConversationTurnRequest) {
+		writeJSON(response, http.StatusBadRequest, map[string]string{
+			"error": "conversation id, message, and risk_assessment_id are required",
 		})
 		return
 	}
+	if errors.Is(err, errAgentConversationReplyFailed) {
+		writeJSON(response, http.StatusBadGateway, map[string]string{
+			"error": "agent conversation llm response failed",
+		})
+		return
+	}
+	writeJSON(response, http.StatusInternalServerError, map[string]string{
+		"error": "agent conversation turn failed",
+	})
+}
 
-	writeJSON(response, http.StatusCreated, turn)
+func writeSSE(response http.ResponseWriter, event string, payload any) {
+	rawPayload, err := json.Marshal(payload)
+	if err != nil {
+		return
+	}
+	_, _ = response.Write([]byte("event: " + event + "\n"))
+	_, _ = response.Write([]byte("data: " + string(rawPayload) + "\n\n"))
+	if flusher, ok := response.(http.Flusher); ok {
+		flusher.Flush()
+	}
 }
 
 func (server server) handleConfirmActionSuggestion(response http.ResponseWriter, request *http.Request) {

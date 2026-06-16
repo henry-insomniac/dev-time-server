@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -13,6 +14,8 @@ import (
 
 	"github.com/henry-insomniac/dev-time-server/internal/db"
 )
+
+var errGitHubRateLimited = errors.New("github rate limited")
 
 type githubRepositoryInstallation struct {
 	ID int64 `json:"id"`
@@ -156,6 +159,7 @@ func (server server) liveGitHubChecks(
 		}
 		items = append(items, internalCheckRun{
 			EvidenceRef: evidenceRef,
+			RunID:       checkRun.ID,
 			Name:        checkRun.Name,
 			Status:      checkRun.Status,
 			Conclusion:  checkRun.Conclusion,
@@ -163,6 +167,34 @@ func (server server) liveGitHubChecks(
 		})
 	}
 	return items, nil
+}
+
+func (server server) liveGitHubCheckLogs(
+	ctx context.Context,
+	repository db.GitHubRepositoryAccess,
+	runID int64,
+) (internalCheckLogExcerpt, error) {
+	token, err := server.githubInstallationTokenForRepository(ctx, repository)
+	if err != nil {
+		return internalCheckLogExcerpt{}, err
+	}
+	rawLogs, err := requestGitHubAPIText(
+		ctx,
+		server.githubApp,
+		token,
+		"/repos/"+githubPath(repository.Owner)+"/"+githubPath(repository.Name)+
+			"/check-runs/"+strconv.FormatInt(runID, 10)+"/logs",
+	)
+	if err != nil {
+		return internalCheckLogExcerpt{}, err
+	}
+	return internalCheckLogExcerpt{
+		RunID:        runID,
+		CheckName:    "github check " + strconv.FormatInt(runID, 10),
+		Conclusion:   "failure",
+		LogExcerpt:   truncateGitHubLogExcerpt(rawLogs, 4000),
+		EvidenceRefs: []string{"github_live_check_run_" + strconv.FormatInt(runID, 10) + "_logs"},
+	}, nil
 }
 
 func (server server) githubInstallationTokenForRepository(
@@ -231,27 +263,88 @@ func requestGitHubAPIWithBearer(
 	target any,
 ) error {
 	requestURL := strings.TrimRight(config.APIBaseURL, "/") + pathAndQuery
+	for attempt := 0; attempt < 2; attempt++ {
+		request, err := http.NewRequestWithContext(ctx, http.MethodGet, requestURL, nil)
+		if err != nil {
+			return fmt.Errorf("create github api request: %w", err)
+		}
+		request.Header.Set("Accept", "application/vnd.github+json")
+		request.Header.Set("Authorization", "Bearer "+bearer)
+		request.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+
+		response, err := githubHTTPClient.Do(request)
+		if err != nil {
+			if attempt == 0 {
+				continue
+			}
+			return fmt.Errorf("request github api: %w", err)
+		}
+		defer response.Body.Close()
+		if response.StatusCode >= 200 && response.StatusCode < 300 {
+			if err := json.NewDecoder(response.Body).Decode(target); err != nil {
+				return fmt.Errorf("decode github api response: %w", err)
+			}
+			return nil
+		}
+		body, _ := io.ReadAll(io.LimitReader(response.Body, 1024))
+		if isGitHubRateLimitResponse(response) {
+			return fmt.Errorf("%w: github api status %d: %s", errGitHubRateLimited, response.StatusCode, string(body))
+		}
+		if response.StatusCode >= 500 && attempt == 0 {
+			continue
+		}
+		return fmt.Errorf("github api status %d: %s", response.StatusCode, string(body))
+	}
+	return fmt.Errorf("github api request failed")
+}
+
+func requestGitHubAPIText(
+	ctx context.Context,
+	config GitHubAppConfig,
+	token string,
+	pathAndQuery string,
+) (string, error) {
+	requestURL := strings.TrimRight(config.APIBaseURL, "/") + pathAndQuery
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, requestURL, nil)
 	if err != nil {
-		return fmt.Errorf("create github api request: %w", err)
+		return "", fmt.Errorf("create github api request: %w", err)
 	}
 	request.Header.Set("Accept", "application/vnd.github+json")
-	request.Header.Set("Authorization", "Bearer "+bearer)
+	request.Header.Set("Authorization", "Bearer "+token)
 	request.Header.Set("X-GitHub-Api-Version", "2022-11-28")
 
 	response, err := githubHTTPClient.Do(request)
 	if err != nil {
-		return fmt.Errorf("request github api: %w", err)
+		return "", fmt.Errorf("request github api: %w", err)
 	}
 	defer response.Body.Close()
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		body, _ := io.ReadAll(io.LimitReader(response.Body, 1024))
-		return fmt.Errorf("github api status %d: %s", response.StatusCode, string(body))
+		if isGitHubRateLimitResponse(response) {
+			return "", fmt.Errorf("%w: github api status %d: %s", errGitHubRateLimited, response.StatusCode, string(body))
+		}
+		return "", fmt.Errorf("github api status %d: %s", response.StatusCode, string(body))
 	}
-	if err := json.NewDecoder(response.Body).Decode(target); err != nil {
-		return fmt.Errorf("decode github api response: %w", err)
+	body, err := io.ReadAll(io.LimitReader(response.Body, 64*1024))
+	if err != nil {
+		return "", fmt.Errorf("read github api text response: %w", err)
 	}
-	return nil
+	return string(body), nil
+}
+
+func truncateGitHubLogExcerpt(logs string, limit int) string {
+	logs = strings.TrimSpace(logs)
+	if len(logs) <= limit {
+		return logs
+	}
+	return logs[:limit]
+}
+
+func isGitHubRateLimitResponse(response *http.Response) bool {
+	if response.StatusCode != http.StatusForbidden && response.StatusCode != http.StatusTooManyRequests {
+		return false
+	}
+	return response.Header.Get("X-RateLimit-Remaining") == "0"
 }
 
 func githubPath(value string) string {

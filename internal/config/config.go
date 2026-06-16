@@ -13,6 +13,10 @@ type Config struct {
 	GitHubSetupStateSecret string
 	GitHubAPIBaseURL       string
 	GitHubInstallBaseURL   string
+	GitHubOAuthClientID    string
+	GitHubOAuthSecret      string
+	GitHubOAuthBaseURL     string
+	GitHubWebhookSecret    string
 	FrontendBaseURL        string
 }
 
@@ -31,6 +35,10 @@ func Load() Config {
 		GitHubSetupStateSecret: os.Getenv("GITHUB_APP_SETUP_STATE_SECRET"),
 		GitHubAPIBaseURL:       valueOrDefault("GITHUB_API_BASE_URL", "https://api.github.com"),
 		GitHubInstallBaseURL:   valueOrDefault("GITHUB_INSTALLATION_BASE_URL", "https://github.com"),
+		GitHubOAuthClientID:    os.Getenv("GITHUB_OAUTH_CLIENT_ID"),
+		GitHubOAuthSecret:      os.Getenv("GITHUB_OAUTH_CLIENT_SECRET"),
+		GitHubOAuthBaseURL:     valueOrDefault("GITHUB_OAUTH_BASE_URL", "https://github.com"),
+		GitHubWebhookSecret:    os.Getenv("GITHUB_WEBHOOK_SECRET"),
 		FrontendBaseURL:        valueOrDefault("DEV_TIME_FRONTEND_BASE_URL", "http://localhost:5173"),
 	}
 }

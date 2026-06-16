@@ -1,0 +1,16 @@
+[Unit]
+Description=Dev Time Server
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/dev-time/server.env
+ExecStart=/opt/dev-time/server/dev-time-server
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

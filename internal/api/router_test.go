@@ -51,6 +51,9 @@ func TestRouterAllowsLocalDevCORS(t *testing.T) {
 	if response.Header().Get("Access-Control-Allow-Methods") == "" {
 		t.Fatal("expected allowed methods header")
 	}
+	if response.Header().Get("Access-Control-Allow-Credentials") != "true" {
+		t.Fatalf("expected credentials to be allowed, got %q", response.Header().Get("Access-Control-Allow-Credentials"))
+	}
 }
 
 func TestGitHubSettingsWithoutStoreReportsDisconnected(t *testing.T) {

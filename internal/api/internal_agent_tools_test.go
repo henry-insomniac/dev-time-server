@@ -374,6 +374,215 @@ func TestInternalGitHubRepositoryPullRequestsFallBackToLiveGitHub(t *testing.T) 
 	}
 }
 
+func TestInternalGitHubRepositoryPullRequestsReturnsFriendlyRateLimitError(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	privateKeyPath := writeTestGitHubAppPrivateKey(t)
+	githubServer := httptest.NewServer(http.HandlerFunc(func(
+		response http.ResponseWriter,
+		request *http.Request,
+	) {
+		switch {
+		case request.Method == http.MethodGet &&
+			request.URL.Path == "/repos/henry-insomniac/dev-time-agent/installation":
+			writeTestJSON(response, map[string]any{"id": 123})
+		case request.Method == http.MethodPost &&
+			request.URL.Path == "/app/installations/123/access_tokens":
+			writeTestJSON(response, map[string]any{"token": "installation-token"})
+		case request.Method == http.MethodGet &&
+			request.URL.Path == "/repos/henry-insomniac/dev-time-agent/pulls":
+			response.Header().Set("X-RateLimit-Remaining", "0")
+			response.WriteHeader(http.StatusForbidden)
+			_, _ = response.Write([]byte(`{"message":"API rate limit exceeded"}`))
+		default:
+			t.Fatalf("unexpected github request %s %s", request.Method, request.URL.Path)
+		}
+	}))
+	defer githubServer.Close()
+
+	store := testsupport.NewMigratedStore(t, ctx)
+	router := api.NewRouter(api.Dependencies{
+		Store: store,
+		GitHubApp: api.GitHubAppConfig{
+			AppID:            "12345",
+			AppSlug:          "dev-time-test",
+			PrivateKeyPath:   privateKeyPath,
+			SetupStateSecret: "state-secret",
+			APIBaseURL:       githubServer.URL,
+		},
+	})
+	importProject(t, router, 1001, "dev-time-agent")
+
+	response := performJSONRequest(
+		router,
+		http.MethodGet,
+		"/internal/github/repositories/repo_1001/pull-requests",
+		nil,
+	)
+	if response.Code != http.StatusTooManyRequests {
+		t.Fatalf("expected github rate limit 429, got %d: %s", response.Code, response.Body.String())
+	}
+	var body struct {
+		ErrorCode string `json:"error_code"`
+		Error     string `json:"error"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&body); err != nil {
+		t.Fatalf("decode rate limit error: %v", err)
+	}
+	if body.ErrorCode != "github_rate_limited" || body.Error == "" {
+		t.Fatalf("expected friendly github rate limit error, got %#v", body)
+	}
+}
+
+func TestInternalGitHubRepositoryPullRequestsRetryTransientGitHubError(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	privateKeyPath := writeTestGitHubAppPrivateKey(t)
+	pullRequestAttempts := 0
+	githubServer := httptest.NewServer(http.HandlerFunc(func(
+		response http.ResponseWriter,
+		request *http.Request,
+	) {
+		switch {
+		case request.Method == http.MethodGet &&
+			request.URL.Path == "/repos/henry-insomniac/dev-time-agent/installation":
+			writeTestJSON(response, map[string]any{"id": 123})
+		case request.Method == http.MethodPost &&
+			request.URL.Path == "/app/installations/123/access_tokens":
+			writeTestJSON(response, map[string]any{"token": "installation-token"})
+		case request.Method == http.MethodGet &&
+			request.URL.Path == "/repos/henry-insomniac/dev-time-agent/pulls":
+			pullRequestAttempts += 1
+			if pullRequestAttempts == 1 {
+				response.WriteHeader(http.StatusBadGateway)
+				_, _ = response.Write([]byte(`{"message":"temporary upstream failure"}`))
+				return
+			}
+			writeTestJSON(response, []map[string]any{
+				{
+					"number":   12,
+					"title":    "Fix CI",
+					"state":    "open",
+					"html_url": "https://github.com/henry-insomniac/dev-time-agent/pull/12",
+				},
+			})
+		default:
+			t.Fatalf("unexpected github request %s %s", request.Method, request.URL.Path)
+		}
+	}))
+	defer githubServer.Close()
+
+	store := testsupport.NewMigratedStore(t, ctx)
+	router := api.NewRouter(api.Dependencies{
+		Store: store,
+		GitHubApp: api.GitHubAppConfig{
+			AppID:            "12345",
+			AppSlug:          "dev-time-test",
+			PrivateKeyPath:   privateKeyPath,
+			SetupStateSecret: "state-secret",
+			APIBaseURL:       githubServer.URL,
+		},
+	})
+	importProject(t, router, 1001, "dev-time-agent")
+
+	response := performJSONRequest(
+		router,
+		http.MethodGet,
+		"/internal/github/repositories/repo_1001/pull-requests",
+		nil,
+	)
+	if response.Code != http.StatusOK {
+		t.Fatalf("expected github pull requests 200 after retry, got %d: %s", response.Code, response.Body.String())
+	}
+	if pullRequestAttempts != 2 {
+		t.Fatalf("expected one retry after transient failure, got %d attempts", pullRequestAttempts)
+	}
+}
+
+func TestInternalGitHubRepositoryCheckLogsReadFromLiveGitHub(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	privateKeyPath := writeTestGitHubAppPrivateKey(t)
+	var logsRequested bool
+	githubServer := httptest.NewServer(http.HandlerFunc(func(
+		response http.ResponseWriter,
+		request *http.Request,
+	) {
+		switch {
+		case request.Method == http.MethodGet &&
+			request.URL.Path == "/repos/henry-insomniac/dev-time-agent/installation":
+			writeTestJSON(response, map[string]any{"id": 123})
+		case request.Method == http.MethodPost &&
+			request.URL.Path == "/app/installations/123/access_tokens":
+			writeTestJSON(response, map[string]any{"token": "installation-token"})
+		case request.Method == http.MethodGet &&
+			request.URL.Path == "/repos/henry-insomniac/dev-time-agent/check-runs/812/logs":
+			logsRequested = true
+			if request.Header.Get("Authorization") != "Bearer installation-token" {
+				t.Fatalf("expected installation token authorization, got %q", request.Header.Get("Authorization"))
+			}
+			response.Header().Set("Content-Type", "text/plain")
+			_, _ = response.Write([]byte(
+				"src/planner.ts:45:7 error 'draftPlan' is assigned a value but never used no-unused-vars\n" +
+					"src/router.ts:18:10 error 'route' is defined but never used no-unused-vars\n" +
+					"src/client.ts:11:3 error 'debug' is defined but never used no-unused-vars",
+			))
+		default:
+			t.Fatalf("unexpected github request %s %s", request.Method, request.URL.Path)
+		}
+	}))
+	defer githubServer.Close()
+
+	store := testsupport.NewMigratedStore(t, ctx)
+	router := api.NewRouter(api.Dependencies{
+		Store: store,
+		GitHubApp: api.GitHubAppConfig{
+			AppID:            "12345",
+			AppSlug:          "dev-time-test",
+			PrivateKeyPath:   privateKeyPath,
+			SetupStateSecret: "state-secret",
+			APIBaseURL:       githubServer.URL,
+		},
+	})
+	importProject(t, router, 1001, "dev-time-agent")
+
+	response := performJSONRequest(
+		router,
+		http.MethodGet,
+		"/internal/github/repositories/repo_1001/checks/812/logs",
+		nil,
+	)
+	if response.Code != http.StatusOK {
+		t.Fatalf("expected github check logs 200, got %d: %s", response.Code, response.Body.String())
+	}
+
+	var body struct {
+		RunID        int64    `json:"run_id"`
+		CheckName    string   `json:"check_name"`
+		Conclusion   string   `json:"conclusion"`
+		LogExcerpt   string   `json:"log_excerpt"`
+		EvidenceRefs []string `json:"evidence_refs"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&body); err != nil {
+		t.Fatalf("decode github check logs: %v", err)
+	}
+	if body.RunID != 812 ||
+		body.CheckName != "github check 812" ||
+		body.Conclusion != "failure" ||
+		!strings.Contains(body.LogExcerpt, "src/planner.ts:45") ||
+		!strings.Contains(body.LogExcerpt, "no-unused-vars") ||
+		len(body.EvidenceRefs) != 1 ||
+		body.EvidenceRefs[0] != "github_live_check_run_812_logs" {
+		t.Fatalf("expected slim github check log excerpt, got %#v", body)
+	}
+	if !logsRequested {
+		t.Fatal("expected live github logs request")
+	}
+}
+
 func TestInternalGitHubRepositoryIssuesListFromEvents(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()

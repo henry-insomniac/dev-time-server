@@ -1,0 +1,97 @@
+name: Deploy dev-time-server
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: dev-time-server-production
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - run: go test -p=1 ./...
+      - run: go build -o dist/dev-time-server ./cmd/dev-time-server
+
+  deploy:
+    needs: validate
+    runs-on: ubuntu-latest
+    environment: production
+    if: github.ref == 'refs/heads/main'
+    env:
+      DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+      DEPLOY_PORT: ${{ secrets.DEPLOY_PORT || '22' }}
+      DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+      DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - run: go build -o dist/dev-time-server ./cmd/dev-time-server
+      - name: Install SSH key
+        run: |
+          test -n "$DEPLOY_HOST"
+          test -n "$DEPLOY_USER"
+          test -n "$DEPLOY_SSH_KEY"
+          mkdir -p ~/.ssh
+          printf '%s\n' "$DEPLOY_SSH_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -p "$DEPLOY_PORT" "$DEPLOY_HOST" >> ~/.ssh/known_hosts
+      - name: Upload server artifacts
+        run: |
+          scp -i ~/.ssh/deploy_key -P "$DEPLOY_PORT" \
+            dist/dev-time-server deploy/dev-time-server.service deploy/dev-time.nginx.conf \
+            "$DEPLOY_USER@$DEPLOY_HOST:/tmp/"
+      - name: Activate server
+        run: |
+          ssh -i ~/.ssh/deploy_key -p "$DEPLOY_PORT" "$DEPLOY_USER@$DEPLOY_HOST" 'bash -s' <<'REMOTE'
+          set -euo pipefail
+
+          install -d /opt/dev-time/server /etc/dev-time /var/www/dev-time/releases
+          install -m 0755 /tmp/dev-time-server /opt/dev-time/server/dev-time-server
+          install -m 0644 /tmp/dev-time-server.service /etc/systemd/system/dev-time-server.service
+          install -m 0644 /tmp/dev-time.nginx.conf /etc/nginx/sites-available/dev-time.conf
+          ln -sfn /etc/nginx/sites-available/dev-time.conf /etc/nginx/sites-enabled/dev-time.conf
+
+          if [ ! -f /etc/dev-time/server.env ]; then
+            postgres_password="$(
+              docker exec postgres sh -lc 'printf "%s" "$POSTGRES_PASSWORD"' |
+              python3 -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.stdin.read(), safe=""))'
+            )"
+            llm_secret="$(openssl rand -hex 32)"
+            {
+              printf '%s\n' 'DEV_TIME_SERVER_ADDR=127.0.0.1:8080'
+              printf '%s\n' "DATABASE_URL=postgres://appuser:${postgres_password}@127.0.0.1:5432/appdb?sslmode=disable&search_path=dev_time"
+              printf '%s\n' 'DEV_TIME_AGENT_RUNTIME_BASE_URL=http://127.0.0.1:8001'
+              printf '%s\n' 'DEV_TIME_FRONTEND_BASE_URL=https://dev-time.yiflow.com'
+              printf '%s\n' "DEV_TIME_LLM_KEY_SECRET=${llm_secret}"
+              printf '%s\n' 'GITHUB_APP_ID='
+              printf '%s\n' 'GITHUB_APP_SLUG='
+              printf '%s\n' 'GITHUB_APP_PRIVATE_KEY_PATH=/etc/dev-time/github-app-private-key.pem'
+              printf '%s\n' 'GITHUB_APP_SETUP_STATE_SECRET='
+              printf '%s\n' 'GITHUB_OAUTH_CLIENT_ID='
+              printf '%s\n' 'GITHUB_OAUTH_CLIENT_SECRET='
+              printf '%s\n' 'GITHUB_WEBHOOK_SECRET='
+            } > /etc/dev-time/server.env
+            chmod 600 /etc/dev-time/server.env
+          fi
+
+          docker exec postgres psql -v ON_ERROR_STOP=1 -U appuser -d appdb \
+            -c 'CREATE SCHEMA IF NOT EXISTS dev_time AUTHORIZATION appuser;'
+
+          systemctl daemon-reload
+          systemctl enable --now dev-time-server
+          systemctl restart dev-time-server
+          nginx -t
+          systemctl reload nginx
+          REMOTE

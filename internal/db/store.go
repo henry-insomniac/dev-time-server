@@ -491,6 +491,32 @@ func (store *Store) SetRepositoryAnalysisEnabled(
 	return repository, nil
 }
 
+func (store *Store) DisableRepositoryAnalysisByGitHubID(
+	ctx context.Context,
+	githubID int64,
+	reason string,
+) error {
+	commandTag, err := store.pool.Exec(
+		ctx,
+		`
+		UPDATE repositories
+		SET analysis_enabled = false,
+		    sync_status = 'failed',
+		    sync_failure_reason = $2
+		WHERE github_id = $1
+		`,
+		githubID,
+		reason,
+	)
+	if err != nil {
+		return fmt.Errorf("disable repository analysis by github id: %w", err)
+	}
+	if commandTag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 func (store *Store) MarkRepositorySyncing(
 	ctx context.Context,
 	repositoryID string,

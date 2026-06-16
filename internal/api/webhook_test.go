@@ -3,6 +3,9 @@ package api_test
 import (
 	"bytes"
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -12,6 +15,94 @@ import (
 	"github.com/henry-insomniac/dev-time-server/internal/api"
 	"github.com/henry-insomniac/dev-time-server/internal/testsupport"
 )
+
+func TestGitHubWebhookRejectsInvalidSignatureWhenSecretConfigured(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	store := testsupport.NewMigratedStore(t, ctx)
+	router := api.NewRouter(api.Dependencies{
+		Store: store,
+		GitHubApp: api.GitHubAppConfig{
+			WebhookSecret: "webhook-secret",
+		},
+	})
+
+	payload := []byte(`{
+		"repository": {
+			"id": 1001,
+			"name": "dev-time",
+			"full_name": "henry-insomniac/dev-time",
+			"owner": { "login": "henry-insomniac" }
+		}
+	}`)
+	request := httptest.NewRequest(http.MethodPost, "/api/github/webhook", bytes.NewReader(payload))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-GitHub-Delivery", "delivery-bad-signature")
+	request.Header.Set("X-GitHub-Event", "pull_request")
+	request.Header.Set("X-Hub-Signature-256", "sha256=bad")
+	response := httptest.NewRecorder()
+
+	router.ServeHTTP(response, request)
+
+	if response.Code != http.StatusUnauthorized {
+		t.Fatalf("expected invalid signature status 401, got %d: %s", response.Code, response.Body.String())
+	}
+}
+
+func TestGitHubWebhookInstallationDeletedDisablesRepositoryAnalysis(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	store := testsupport.NewMigratedStore(t, ctx)
+	router := api.NewRouter(api.Dependencies{
+		Store: store,
+		GitHubApp: api.GitHubAppConfig{
+			WebhookSecret: "webhook-secret",
+		},
+	})
+	importProject(t, router, 1001, "dev-time-agent")
+
+	payload := []byte(`{
+		"action": "deleted",
+		"repositories": [
+			{
+				"id": 1001,
+				"name": "dev-time-agent",
+				"full_name": "henry-insomniac/dev-time-agent",
+				"owner": { "login": "henry-insomniac" }
+			}
+		]
+	}`)
+	response := performSignedWebhookRequest(
+		router,
+		"delivery-installation-deleted",
+		"installation",
+		payload,
+		"webhook-secret",
+	)
+	if response.Code != http.StatusAccepted {
+		t.Fatalf("expected installation webhook status 202, got %d: %s", response.Code, response.Body.String())
+	}
+
+	settingsResponse := performJSONRequest(router, http.MethodGet, "/api/settings/github", nil)
+	var body struct {
+		Repositories []struct {
+			FullName        string `json:"full_name"`
+			AnalysisEnabled bool   `json:"analysis_enabled"`
+			SyncStatus      string `json:"sync_status"`
+		} `json:"repositories"`
+	}
+	if err := json.NewDecoder(settingsResponse.Body).Decode(&body); err != nil {
+		t.Fatalf("decode github settings: %v", err)
+	}
+	if len(body.Repositories) != 1 ||
+		body.Repositories[0].FullName != "henry-insomniac/dev-time-agent" ||
+		body.Repositories[0].AnalysisEnabled ||
+		body.Repositories[0].SyncStatus != "failed" {
+		t.Fatalf("expected installation deleted to disable repository analysis, got %#v", body.Repositories)
+	}
+}
 
 func TestGitHubWebhookRecordsDeliveryIdempotently(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
@@ -52,6 +143,31 @@ func TestGitHubWebhookRecordsDeliveryIdempotently(t *testing.T) {
 	if secondEvent.EventID != firstEvent.EventID {
 		t.Fatalf("expected duplicate event id %q, got %q", firstEvent.EventID, secondEvent.EventID)
 	}
+}
+
+func performSignedWebhookRequest(
+	handler http.Handler,
+	deliveryID string,
+	eventType string,
+	body []byte,
+	secret string,
+) *httptest.ResponseRecorder {
+	request := httptest.NewRequest(http.MethodPost, "/api/github/webhook", bytes.NewReader(body))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-GitHub-Delivery", deliveryID)
+	request.Header.Set("X-GitHub-Event", eventType)
+	request.Header.Set("X-Hub-Signature-256", "sha256="+signWebhookBody(secret, body))
+	response := httptest.NewRecorder()
+
+	handler.ServeHTTP(response, request)
+
+	return response
+}
+
+func signWebhookBody(secret string, body []byte) string {
+	mac := hmac.New(sha256.New, []byte(secret))
+	mac.Write(body)
+	return hex.EncodeToString(mac.Sum(nil))
 }
 
 func TestGitHubWebhookRecordsUnsupportedEventAsIgnored(t *testing.T) {

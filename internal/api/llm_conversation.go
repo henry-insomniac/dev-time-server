@@ -47,6 +47,7 @@ func (server server) buildAgentConversationReply(
 		return reply, err
 	}
 
+	agentRuntimeOffline := false
 	if strings.TrimSpace(server.agentRuntimeBaseURL) != "" {
 		projectID, _ := server.store.ProjectIDForRiskAssessment(
 			ctx,
@@ -79,6 +80,7 @@ func (server server) buildAgentConversationReply(
 				&bundle,
 			)
 		}
+		agentRuntimeOffline = true
 	}
 
 	classification := classifyConversationIntent(userMessage)
@@ -105,14 +107,14 @@ func (server server) buildAgentConversationReply(
 
 	if classification.Intent == "project_status" {
 		return agentConversationReply{
-			AgentResponse: fallbackProjectStatusReply(bundle),
+			AgentResponse: offlineFallbackReply(agentRuntimeOffline, fallbackProjectStatusReply(bundle)),
 			EvidenceRefs:  evidenceRefs,
 			Intent:        "project_status",
 		}, nil
 	}
 	if classification.Intent == "action_plan" {
 		return agentConversationReply{
-			AgentResponse: fallbackActionPlanReply(bundle),
+			AgentResponse: offlineFallbackReply(agentRuntimeOffline, fallbackActionPlanReply(bundle)),
 			EvidenceRefs:  evidenceRefs,
 			Intent:        "action_plan",
 		}, nil
@@ -121,7 +123,7 @@ func (server server) buildAgentConversationReply(
 	config, err := server.store.GetActiveLLMProviderConfig(ctx)
 	if errors.Is(err, db.ErrNotFound) {
 		return agentConversationReply{
-			AgentResponse: fallbackAgentConversationReply(bundle),
+			AgentResponse: offlineFallbackReply(agentRuntimeOffline, fallbackAgentConversationReply(bundle)),
 			EvidenceRefs:  evidenceRefs,
 			Intent:        "risk_explain",
 		}, nil
@@ -139,6 +141,13 @@ func (server server) buildAgentConversationReply(
 		EvidenceRefs:  evidenceRefs,
 		Intent:        "risk_explain",
 	}, nil
+}
+
+func offlineFallbackReply(agentRuntimeOffline bool, reply string) string {
+	if !agentRuntimeOffline {
+		return reply
+	}
+	return "智能分析离线，已切换到基础数据兜底。" + reply
 }
 
 func requestAgentRuntimeSessionTurn(
