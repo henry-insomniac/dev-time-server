@@ -73,7 +73,7 @@ jobs:
               printf '%s\n' 'DEV_TIME_SERVER_ADDR=127.0.0.1:8080'
               printf '%s\n' "DATABASE_URL=postgres://appuser:${postgres_password}@127.0.0.1:5432/appdb?sslmode=disable&search_path=dev_time"
               printf '%s\n' 'DEV_TIME_AGENT_RUNTIME_BASE_URL=http://127.0.0.1:8001'
-              printf '%s\n' 'DEV_TIME_FRONTEND_BASE_URL=https://dev-time.yiflow.com'
+              printf '%s\n' 'DEV_TIME_FRONTEND_BASE_URL=https://dev-time.yi-flow.com'
               printf '%s\n' "DEV_TIME_LLM_KEY_SECRET=${llm_secret}"
               printf '%s\n' 'GITHUB_APP_ID='
               printf '%s\n' 'GITHUB_APP_SLUG='
