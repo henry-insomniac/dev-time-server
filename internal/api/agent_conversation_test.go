@@ -849,6 +849,15 @@ func TestAgentConversationTurnUsesConfiguredAgentRuntime(t *testing.T) {
 		RiskAssessmentID string          `json:"risk_assessment_id"`
 		Message          string          `json:"message"`
 		EvidenceBundle   json.RawMessage `json:"evidence_bundle"`
+		PageContext      struct {
+			Route            string `json:"route"`
+			UserRole         string `json:"user_role"`
+			SelectedResource struct {
+				Type string `json:"type"`
+				ID   string `json:"id"`
+				Name string `json:"name"`
+			} `json:"selected_resource"`
+		} `json:"page_context"`
 	}
 	sessionTurnCalls := 0
 	agentRuntime := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
@@ -907,7 +916,16 @@ func TestAgentConversationTurnUsesConfiguredAgentRuntime(t *testing.T) {
 		"/api/agent-conversations/"+conversation.ID+"/turns",
 		[]byte(`{
 			"message": "给我下一步行动计划",
-			"risk_assessment_id": "`+assessmentID+`"
+			"risk_assessment_id": "`+assessmentID+`",
+			"page_context": {
+				"route": "/projects/`+projectID+`/agent",
+				"user_role": "developer",
+				"selected_resource": {
+					"type": "repository",
+					"id": "repo_1001",
+					"name": "henry-insomniac/dev-time"
+				}
+			}
 		}`),
 	)
 	if turnResponse.Code != http.StatusCreated {
@@ -919,7 +937,14 @@ func TestAgentConversationTurnUsesConfiguredAgentRuntime(t *testing.T) {
 		EvidenceRefs  []string `json:"evidence_refs"`
 		Intent        string   `json:"intent"`
 		Domain        string   `json:"domain"`
-		Entities      map[string]struct {
+		PageContext   struct {
+			Route            string `json:"route"`
+			UserRole         string `json:"user_role"`
+			SelectedResource struct {
+				Name string `json:"name"`
+			} `json:"selected_resource"`
+		} `json:"page_context"`
+		Entities map[string]struct {
 			ID       string `json:"id"`
 			Name     string `json:"name"`
 			FullName string `json:"full_name"`
@@ -944,6 +969,11 @@ func TestAgentConversationTurnUsesConfiguredAgentRuntime(t *testing.T) {
 	if runtimeRequest.Message != "给我下一步行动计划" {
 		t.Fatalf("expected runtime message, got %q", runtimeRequest.Message)
 	}
+	if runtimeRequest.PageContext.Route != "/projects/"+projectID+"/agent" ||
+		runtimeRequest.PageContext.UserRole != "developer" ||
+		runtimeRequest.PageContext.SelectedResource.Name != "henry-insomniac/dev-time" {
+		t.Fatalf("expected runtime page context, got %#v", runtimeRequest.PageContext)
+	}
 	if len(runtimeRequest.EvidenceBundle) != 0 {
 		t.Fatalf("expected no server-provided evidence bundle after runtime tool response, got %s", string(runtimeRequest.EvidenceBundle))
 	}
@@ -955,6 +985,11 @@ func TestAgentConversationTurnUsesConfiguredAgentRuntime(t *testing.T) {
 	}
 	if turn.Domain != "github" {
 		t.Fatalf("expected runtime domain, got %q", turn.Domain)
+	}
+	if turn.PageContext.Route != "/projects/"+projectID+"/agent" ||
+		turn.PageContext.UserRole != "developer" ||
+		turn.PageContext.SelectedResource.Name != "henry-insomniac/dev-time" {
+		t.Fatalf("expected persisted turn page context, got %#v", turn.PageContext)
 	}
 	if turn.Entities["repository"].FullName != "henry-insomniac/dev-time-agent" {
 		t.Fatalf("expected runtime entities, got %#v", turn.Entities)
@@ -1098,6 +1133,211 @@ func TestAgentConversationTurnReturnsRuntimeReasoningTrace(t *testing.T) {
 		len(turn.ApprovalRequest.Actions) != 1 ||
 		turn.ApprovalRequest.Actions[0].TargetRef != "pull_request:18" {
 		t.Fatalf("expected pending approval request, got %#v", turn.ApprovalRequest)
+	}
+}
+
+func TestAgentConversationTurnPersistsSupportedUIBlocksAndSanitizesUnknownTypes(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	agentRuntime := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		response.Header().Set("Content-Type", "application/json")
+		_, _ = response.Write([]byte(`{
+			"session_id": "conversation_project_repo_1001",
+			"conversation_id": "conversation_project_repo_1001",
+			"user_message": "展示当前仓库",
+			"agent_response": "当前仓库是 henry-insomniac/dev-time。",
+			"intent": "github_repository_detail",
+			"confidence": 0.91,
+			"evidence_refs": [],
+			"current_node": "response_verifier",
+			"trace_events": [],
+			"tool_calls": [],
+			"approval_request": null,
+			"reasoning_trace": [],
+			"ui_blocks": [
+				{
+					"type": "repo_card",
+					"props": {
+						"full_name": "henry-insomniac/dev-time",
+						"risk_level": "medium"
+					}
+				},
+				{
+					"type": "script",
+					"props": {
+						"html": "<script>alert(1)</script>"
+					}
+				}
+			]
+		}`))
+	}))
+	defer agentRuntime.Close()
+
+	store := testsupport.NewMigratedStore(t, ctx)
+	router := api.NewRouter(api.Dependencies{
+		Store:               store,
+		AgentRuntimeBaseURL: agentRuntime.URL,
+	})
+
+	projectID, assessmentID := createProjectRisk(t, router)
+	conversationResponse := performJSONRequest(
+		router,
+		http.MethodGet,
+		"/api/projects/"+projectID+"/agent-conversation?risk_assessment_id="+assessmentID,
+		nil,
+	)
+	var conversation struct {
+		ID string `json:"id"`
+	}
+	if err := json.NewDecoder(conversationResponse.Body).Decode(&conversation); err != nil {
+		t.Fatalf("decode conversation response: %v", err)
+	}
+
+	turnResponse := performJSONRequest(
+		router,
+		http.MethodPost,
+		"/api/agent-conversations/"+conversation.ID+"/turns",
+		[]byte(`{
+			"message": "展示当前仓库",
+			"risk_assessment_id": "`+assessmentID+`"
+		}`),
+	)
+	if turnResponse.Code != http.StatusCreated {
+		t.Fatalf("expected turn status 201, got %d: %s", turnResponse.Code, turnResponse.Body.String())
+	}
+
+	var turn struct {
+		AgentResponse string `json:"agent_response"`
+		UIBlocks      []struct {
+			Type  string         `json:"type"`
+			Props map[string]any `json:"props"`
+		} `json:"ui_blocks"`
+	}
+	if err := json.NewDecoder(turnResponse.Body).Decode(&turn); err != nil {
+		t.Fatalf("decode turn response: %v", err)
+	}
+	if turn.AgentResponse == "" {
+		t.Fatalf("expected text fallback to be preserved")
+	}
+	if len(turn.UIBlocks) != 1 || turn.UIBlocks[0].Type != "repo_card" {
+		t.Fatalf("expected only supported repo_card block, got %#v", turn.UIBlocks)
+	}
+	if turn.UIBlocks[0].Props["full_name"] != "henry-insomniac/dev-time" {
+		t.Fatalf("expected repo card props, got %#v", turn.UIBlocks[0].Props)
+	}
+}
+
+func TestAgentConversationTurnPersistsTraceToolAndModelMetrics(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	agentRuntime := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		response.Header().Set("Content-Type", "application/json")
+		_, _ = response.Write([]byte(`{
+			"session_id": "conversation_project_repo_1001",
+			"conversation_id": "conversation_project_repo_1001",
+			"user_message": "诊断 CI",
+			"agent_response": "CI 日志读取被审批边界阻断。",
+			"intent": "pr_ci_diagnosis",
+			"confidence": 0.91,
+			"evidence_refs": ["event_check-run-812"],
+			"current_node": "response_verifier",
+			"trace_events": [],
+			"tool_calls": [
+				{
+					"name": "github.checks.logs",
+					"status": "blocked",
+					"latency_ms": 12,
+					"error": "approval_required",
+					"evidence_refs": ["event_check-run-812"],
+					"risk_level": "medium",
+					"approval_required": true
+				}
+			],
+			"model_calls": [
+				{
+					"provider": "openai",
+					"model": "gpt-4.1",
+					"latency_ms": 321,
+					"token_usage": {"input": 120, "output": 40}
+				}
+			],
+			"approval_request": null,
+			"reasoning_trace": []
+		}`))
+	}))
+	defer agentRuntime.Close()
+
+	store := testsupport.NewMigratedStore(t, ctx)
+	router := api.NewRouter(api.Dependencies{
+		Store:               store,
+		AgentRuntimeBaseURL: agentRuntime.URL,
+	})
+
+	projectID, assessmentID := createProjectRisk(t, router)
+	conversationResponse := performJSONRequest(
+		router,
+		http.MethodGet,
+		"/api/projects/"+projectID+"/agent-conversation?risk_assessment_id="+assessmentID,
+		nil,
+	)
+	var conversation struct {
+		ID string `json:"id"`
+	}
+	if err := json.NewDecoder(conversationResponse.Body).Decode(&conversation); err != nil {
+		t.Fatalf("decode conversation response: %v", err)
+	}
+
+	turnResponse := performJSONRequest(
+		router,
+		http.MethodPost,
+		"/api/agent-conversations/"+conversation.ID+"/turns",
+		[]byte(`{
+			"message": "诊断 CI",
+			"risk_assessment_id": "`+assessmentID+`"
+		}`),
+	)
+	if turnResponse.Code != http.StatusCreated {
+		t.Fatalf("expected turn status 201, got %d: %s", turnResponse.Code, turnResponse.Body.String())
+	}
+
+	var turn struct {
+		ID        string `json:"id"`
+		TraceID   string `json:"trace_id"`
+		ToolCalls []struct {
+			Name             string   `json:"name"`
+			Status           string   `json:"status"`
+			LatencyMS        int      `json:"latency_ms"`
+			Error            string   `json:"error"`
+			EvidenceRefs     []string `json:"evidence_refs"`
+			RiskLevel        string   `json:"risk_level"`
+			ApprovalRequired bool     `json:"approval_required"`
+		} `json:"tool_calls"`
+		ModelCalls []struct {
+			Provider   string         `json:"provider"`
+			Model      string         `json:"model"`
+			LatencyMS  int            `json:"latency_ms"`
+			TokenUsage map[string]any `json:"token_usage"`
+		} `json:"model_calls"`
+	}
+	if err := json.NewDecoder(turnResponse.Body).Decode(&turn); err != nil {
+		t.Fatalf("decode turn response: %v", err)
+	}
+	if turn.TraceID == "" || turn.TraceID != "trace_"+turn.ID {
+		t.Fatalf("expected stable trace id, got %#v", turn)
+	}
+	if len(turn.ToolCalls) != 1 ||
+		turn.ToolCalls[0].Status != "blocked" ||
+		turn.ToolCalls[0].LatencyMS != 12 ||
+		!turn.ToolCalls[0].ApprovalRequired {
+		t.Fatalf("expected blocked tool metrics, got %#v", turn.ToolCalls)
+	}
+	if len(turn.ModelCalls) != 1 ||
+		turn.ModelCalls[0].Provider != "openai" ||
+		turn.ModelCalls[0].Model != "gpt-4.1" ||
+		turn.ModelCalls[0].TokenUsage["input"].(float64) != 120 {
+		t.Fatalf("expected model metrics, got %#v", turn.ModelCalls)
 	}
 }
 

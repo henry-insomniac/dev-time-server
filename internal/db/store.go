@@ -24,6 +24,7 @@ type Store struct {
 }
 
 var ErrNotFound = errors.New("not found")
+var ErrConflict = errors.New("conflict")
 
 type RepositoryInput struct {
 	GitHubID int64
@@ -175,6 +176,7 @@ type AgentConversation struct {
 
 type AgentConversationTurn struct {
 	ID              string               `json:"id"`
+	TraceID         string               `json:"trace_id"`
 	ConversationID  string               `json:"conversation_id"`
 	UserMessage     string               `json:"user_message"`
 	AgentResponse   string               `json:"agent_response"`
@@ -183,8 +185,11 @@ type AgentConversationTurn struct {
 	Domain          string               `json:"domain"`
 	Entities        map[string]any       `json:"entities"`
 	Capabilities    []string             `json:"capabilities"`
+	PageContext     map[string]any       `json:"page_context,omitempty"`
 	TraceEvents     []AgentTraceEvent    `json:"trace_events"`
+	UIBlocks        []map[string]any     `json:"ui_blocks"`
 	ToolCalls       []map[string]any     `json:"tool_calls"`
+	ModelCalls      []map[string]any     `json:"model_calls"`
 	ApprovalRequest map[string]any       `json:"approval_request,omitempty"`
 	ReasoningTrace  []ReasoningTraceStep `json:"reasoning_trace"`
 }
@@ -227,6 +232,41 @@ type ActionSuggestion struct {
 	TargetRef    string   `json:"target_ref"`
 	DraftBody    string   `json:"draft_body"`
 	EvidenceRefs []string `json:"evidence_refs"`
+}
+
+type ApprovalRequestInput struct {
+	ProjectID          string
+	ActionSuggestionID string
+	ActionType         string
+	TargetRef          string
+	DraftBody          string
+	RiskLevel          string
+	EvidenceRefs       []string
+	BeforePayload      map[string]any
+	AfterPayload       map[string]any
+}
+
+type ApprovalRequest struct {
+	ID                 string         `json:"id"`
+	ProjectID          string         `json:"project_id"`
+	ActionSuggestionID string         `json:"action_suggestion_id,omitempty"`
+	ActionType         string         `json:"action_type"`
+	Status             string         `json:"status"`
+	TargetRef          string         `json:"target_ref"`
+	DraftBody          string         `json:"draft_body"`
+	RiskLevel          string         `json:"risk_level"`
+	EvidenceRefs       []string       `json:"evidence_refs"`
+	BeforePayload      map[string]any `json:"before_payload"`
+	AfterPayload       map[string]any `json:"after_payload"`
+	ApprovalToken      string         `json:"approval_token,omitempty"`
+}
+
+type AuditEvent struct {
+	ID                 string         `json:"id"`
+	ApprovalRequestID  string         `json:"approval_request_id,omitempty"`
+	ActionSuggestionID string         `json:"action_suggestion_id,omitempty"`
+	EventType          string         `json:"event_type"`
+	Payload            map[string]any `json:"payload"`
 }
 
 type AgentJob struct {
@@ -1361,7 +1401,10 @@ func (store *Store) AddAgentConversationTurn(
 	domain string,
 	entities map[string]any,
 	capabilities []string,
+	pageContext map[string]any,
+	uiBlocks []map[string]any,
 	toolCalls []map[string]any,
+	modelCalls []map[string]any,
 	approvalRequest map[string]any,
 	reasoningTrace []ReasoningTraceStep,
 ) (AgentConversationTurn, error) {
@@ -1371,11 +1414,20 @@ func (store *Store) AddAgentConversationTurn(
 	if toolCalls == nil {
 		toolCalls = []map[string]any{}
 	}
+	if modelCalls == nil {
+		modelCalls = []map[string]any{}
+	}
 	if entities == nil {
 		entities = map[string]any{}
 	}
 	if capabilities == nil {
 		capabilities = []string{}
+	}
+	if pageContext == nil {
+		pageContext = map[string]any{}
+	}
+	if uiBlocks == nil {
+		uiBlocks = []map[string]any{}
 	}
 	if reasoningTrace == nil {
 		reasoningTrace = []ReasoningTraceStep{}
@@ -1388,12 +1440,27 @@ func (store *Store) AddAgentConversationTurn(
 	if err != nil {
 		return AgentConversationTurn{}, fmt.Errorf("marshal turn tool calls: %w", err)
 	}
+	rawModelCalls, err := json.Marshal(modelCalls)
+	if err != nil {
+		return AgentConversationTurn{}, fmt.Errorf("marshal turn model calls: %w", err)
+	}
 	rawApprovalRequest, err := json.Marshal(approvalRequest)
 	if err != nil {
 		return AgentConversationTurn{}, fmt.Errorf("marshal turn approval request: %w", err)
 	}
 	if approvalRequest == nil {
 		rawApprovalRequest = nil
+	}
+	rawPageContext, err := json.Marshal(pageContext)
+	if err != nil {
+		return AgentConversationTurn{}, fmt.Errorf("marshal turn page context: %w", err)
+	}
+	if len(pageContext) == 0 {
+		rawPageContext = nil
+	}
+	rawUIBlocks, err := json.Marshal(uiBlocks)
+	if err != nil {
+		return AgentConversationTurn{}, fmt.Errorf("marshal turn ui blocks: %w", err)
 	}
 	rawReasoningTrace, err := json.Marshal(reasoningTrace)
 	if err != nil {
@@ -1410,35 +1477,47 @@ func (store *Store) AddAgentConversationTurn(
 		Domain:          domain,
 		Entities:        entities,
 		Capabilities:    capabilities,
+		PageContext:     pageContext,
+		UIBlocks:        uiBlocks,
 		ToolCalls:       toolCalls,
+		ModelCalls:      modelCalls,
 		ApprovalRequest: approvalRequest,
 		ReasoningTrace:  reasoningTrace,
 	}
+	turn.TraceID = "trace_" + turn.ID
 
 	if _, err := store.pool.Exec(
 		ctx,
 		`
 		INSERT INTO agent_conversation_turns (
 			id,
+			trace_id,
 			conversation_id,
 			role,
 			user_message,
 			agent_response,
 			evidence_refs,
 			intent,
+			page_context,
+			ui_blocks,
 			tool_calls,
+			model_calls,
 			approval_request,
 			reasoning_trace
 		)
-		VALUES ($1, $2, 'agent', $3, $4, $5, $6, $7, $8, $9)
+		VALUES ($1, $2, $3, 'agent', $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
 		`,
 		turn.ID,
+		turn.TraceID,
 		turn.ConversationID,
 		turn.UserMessage,
 		turn.AgentResponse,
 		rawEvidenceRefs,
 		turn.Intent,
+		rawPageContext,
+		rawUIBlocks,
 		rawToolCalls,
+		rawModelCalls,
 		rawApprovalRequest,
 		rawReasoningTrace,
 	); err != nil {
@@ -1538,6 +1617,353 @@ func listUnique(values []string) []string {
 		unique = append(unique, value)
 	}
 	return unique
+}
+
+func (store *Store) CreateApprovalRequest(
+	ctx context.Context,
+	input ApprovalRequestInput,
+) (ApprovalRequest, error) {
+	evidenceRefs, err := json.Marshal(input.EvidenceRefs)
+	if err != nil {
+		return ApprovalRequest{}, fmt.Errorf("marshal approval evidence refs: %w", err)
+	}
+	beforePayload, err := json.Marshal(nonNilMap(input.BeforePayload))
+	if err != nil {
+		return ApprovalRequest{}, fmt.Errorf("marshal approval before payload: %w", err)
+	}
+	afterPayload, err := json.Marshal(nonNilMap(input.AfterPayload))
+	if err != nil {
+		return ApprovalRequest{}, fmt.Errorf("marshal approval after payload: %w", err)
+	}
+	token, err := newApprovalToken()
+	if err != nil {
+		return ApprovalRequest{}, fmt.Errorf("create approval token: %w", err)
+	}
+	riskLevel := input.RiskLevel
+	if riskLevel == "" {
+		riskLevel = "medium"
+	}
+
+	approvalID := fmt.Sprintf("approval_%d", time.Now().UTC().UnixNano())
+	_, err = store.pool.Exec(
+		ctx,
+		`
+		INSERT INTO approval_requests (
+			id,
+			project_id,
+			action_suggestion_id,
+			action_type,
+			status,
+			target_ref,
+			draft_body,
+			risk_level,
+			evidence_refs,
+			before_payload,
+			after_payload,
+			approval_token_hash
+		)
+		VALUES ($1, $2, NULLIF($3, ''), $4, 'pending', $5, $6, $7, $8, $9, $10, $11)
+		`,
+		approvalID,
+		input.ProjectID,
+		input.ActionSuggestionID,
+		input.ActionType,
+		input.TargetRef,
+		input.DraftBody,
+		riskLevel,
+		evidenceRefs,
+		beforePayload,
+		afterPayload,
+		hashApprovalToken(token),
+	)
+	if err != nil {
+		return ApprovalRequest{}, fmt.Errorf("create approval request: %w", err)
+	}
+	if err := store.recordAuditEvent(
+		ctx,
+		approvalID,
+		input.ActionSuggestionID,
+		"approval.created",
+		map[string]any{"status": "pending"},
+	); err != nil {
+		return ApprovalRequest{}, err
+	}
+
+	approval, err := store.ApprovalRequest(ctx, approvalID)
+	if err != nil {
+		return ApprovalRequest{}, err
+	}
+	approval.ApprovalToken = token
+	return approval, nil
+}
+
+func (store *Store) ConfirmApprovalRequest(
+	ctx context.Context,
+	approvalID string,
+	approvalToken string,
+) (ApprovalRequest, error) {
+	var status string
+	var tokenHash string
+	var actionSuggestionID *string
+	var tokenUsedAt *time.Time
+	if err := store.pool.QueryRow(
+		ctx,
+		`
+		SELECT status, approval_token_hash, action_suggestion_id, approval_token_used_at
+		FROM approval_requests
+		WHERE id = $1
+		`,
+		approvalID,
+	).Scan(&status, &tokenHash, &actionSuggestionID, &tokenUsedAt); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ApprovalRequest{}, ErrNotFound
+		}
+		return ApprovalRequest{}, fmt.Errorf("load approval request for confirm: %w", err)
+	}
+
+	if status != "pending" || tokenUsedAt != nil {
+		_ = store.recordAuditEvent(
+			ctx,
+			approvalID,
+			stringValue(actionSuggestionID),
+			"approval.confirm_replay_blocked",
+			map[string]any{"status": status},
+		)
+		return ApprovalRequest{}, ErrConflict
+	}
+	if approvalToken == "" || hashApprovalToken(approvalToken) != tokenHash {
+		_ = store.recordAuditEvent(
+			ctx,
+			approvalID,
+			stringValue(actionSuggestionID),
+			"approval.confirm_failed",
+			map[string]any{"reason": "invalid_token"},
+		)
+		return ApprovalRequest{}, ErrConflict
+	}
+
+	if _, err := store.pool.Exec(
+		ctx,
+		`
+		UPDATE approval_requests
+		SET status = 'confirmed',
+		    approval_token_used_at = now(),
+		    updated_at = now()
+		WHERE id = $1
+		`,
+		approvalID,
+	); err != nil {
+		return ApprovalRequest{}, fmt.Errorf("confirm approval request: %w", err)
+	}
+	if err := store.recordAuditEvent(
+		ctx,
+		approvalID,
+		stringValue(actionSuggestionID),
+		"approval.confirmed",
+		map[string]any{"status": "confirmed"},
+	); err != nil {
+		return ApprovalRequest{}, err
+	}
+
+	return store.ApprovalRequest(ctx, approvalID)
+}
+
+func (store *Store) RejectApprovalRequest(
+	ctx context.Context,
+	approvalID string,
+	reason string,
+) (ApprovalRequest, error) {
+	var status string
+	var actionSuggestionID *string
+	if err := store.pool.QueryRow(
+		ctx,
+		`
+		SELECT status, action_suggestion_id
+		FROM approval_requests
+		WHERE id = $1
+		`,
+		approvalID,
+	).Scan(&status, &actionSuggestionID); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ApprovalRequest{}, ErrNotFound
+		}
+		return ApprovalRequest{}, fmt.Errorf("load approval request for reject: %w", err)
+	}
+	if status != "pending" {
+		_ = store.recordAuditEvent(
+			ctx,
+			approvalID,
+			stringValue(actionSuggestionID),
+			"approval.reject_blocked",
+			map[string]any{"status": status, "reason": reason},
+		)
+		return ApprovalRequest{}, ErrConflict
+	}
+
+	if _, err := store.pool.Exec(
+		ctx,
+		`
+		UPDATE approval_requests
+		SET status = 'rejected',
+		    updated_at = now()
+		WHERE id = $1
+		`,
+		approvalID,
+	); err != nil {
+		return ApprovalRequest{}, fmt.Errorf("reject approval request: %w", err)
+	}
+	if err := store.recordAuditEvent(
+		ctx,
+		approvalID,
+		stringValue(actionSuggestionID),
+		"approval.rejected",
+		map[string]any{"status": "rejected", "reason": reason},
+	); err != nil {
+		return ApprovalRequest{}, err
+	}
+
+	return store.ApprovalRequest(ctx, approvalID)
+}
+
+func (store *Store) ApprovalRequest(
+	ctx context.Context,
+	approvalID string,
+) (ApprovalRequest, error) {
+	var approval ApprovalRequest
+	var actionSuggestionID *string
+	var rawEvidenceRefs []byte
+	var rawBeforePayload []byte
+	var rawAfterPayload []byte
+	if err := store.pool.QueryRow(
+		ctx,
+		`
+		SELECT
+			id,
+			project_id,
+			action_suggestion_id,
+			action_type,
+			status,
+			target_ref,
+			draft_body,
+			risk_level,
+			evidence_refs,
+			before_payload,
+			after_payload
+		FROM approval_requests
+		WHERE id = $1
+		`,
+		approvalID,
+	).Scan(
+		&approval.ID,
+		&approval.ProjectID,
+		&actionSuggestionID,
+		&approval.ActionType,
+		&approval.Status,
+		&approval.TargetRef,
+		&approval.DraftBody,
+		&approval.RiskLevel,
+		&rawEvidenceRefs,
+		&rawBeforePayload,
+		&rawAfterPayload,
+	); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ApprovalRequest{}, ErrNotFound
+		}
+		return ApprovalRequest{}, fmt.Errorf("load approval request: %w", err)
+	}
+	approval.ActionSuggestionID = stringValue(actionSuggestionID)
+	if err := json.Unmarshal(rawEvidenceRefs, &approval.EvidenceRefs); err != nil {
+		return ApprovalRequest{}, fmt.Errorf("decode approval evidence refs: %w", err)
+	}
+	if err := json.Unmarshal(rawBeforePayload, &approval.BeforePayload); err != nil {
+		return ApprovalRequest{}, fmt.Errorf("decode approval before payload: %w", err)
+	}
+	if err := json.Unmarshal(rawAfterPayload, &approval.AfterPayload); err != nil {
+		return ApprovalRequest{}, fmt.Errorf("decode approval after payload: %w", err)
+	}
+	return approval, nil
+}
+
+func (store *Store) ApprovalAuditEvents(
+	ctx context.Context,
+	approvalID string,
+) ([]AuditEvent, error) {
+	rows, err := store.pool.Query(
+		ctx,
+		`
+		SELECT id, approval_request_id, action_suggestion_id, event_type, payload
+		FROM agent_audit_events
+		WHERE approval_request_id = $1
+		ORDER BY created_at ASC, id ASC
+		`,
+		approvalID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("query approval audit events: %w", err)
+	}
+	defer rows.Close()
+
+	events := []AuditEvent{}
+	for rows.Next() {
+		var event AuditEvent
+		var approvalRequestID *string
+		var actionSuggestionID *string
+		var rawPayload []byte
+		if err := rows.Scan(
+			&event.ID,
+			&approvalRequestID,
+			&actionSuggestionID,
+			&event.EventType,
+			&rawPayload,
+		); err != nil {
+			return nil, fmt.Errorf("scan approval audit event: %w", err)
+		}
+		event.ApprovalRequestID = stringValue(approvalRequestID)
+		event.ActionSuggestionID = stringValue(actionSuggestionID)
+		if err := json.Unmarshal(rawPayload, &event.Payload); err != nil {
+			return nil, fmt.Errorf("decode approval audit payload: %w", err)
+		}
+		events = append(events, event)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate approval audit events: %w", err)
+	}
+	return events, nil
+}
+
+func (store *Store) recordAuditEvent(
+	ctx context.Context,
+	approvalRequestID string,
+	actionSuggestionID string,
+	eventType string,
+	payload map[string]any,
+) error {
+	rawPayload, err := json.Marshal(nonNilMap(payload))
+	if err != nil {
+		return fmt.Errorf("marshal audit payload: %w", err)
+	}
+	eventID := fmt.Sprintf("audit_%d", time.Now().UTC().UnixNano())
+	if _, err := store.pool.Exec(
+		ctx,
+		`
+		INSERT INTO agent_audit_events (
+			id,
+			approval_request_id,
+			action_suggestion_id,
+			event_type,
+			payload
+		)
+		VALUES ($1, NULLIF($2, ''), NULLIF($3, ''), $4, $5)
+		`,
+		eventID,
+		approvalRequestID,
+		actionSuggestionID,
+		eventType,
+		rawPayload,
+	); err != nil {
+		return fmt.Errorf("insert audit event: %w", err)
+	}
+	return nil
 }
 
 func (store *Store) CreateActionSuggestion(
@@ -2164,6 +2590,33 @@ func encryptAPIKey(apiKey string) (string, error) {
 
 	ciphertext := gcm.Seal(nonce, nonce, []byte(apiKey), nil)
 	return "aes-gcm:" + base64.StdEncoding.EncodeToString(ciphertext), nil
+}
+
+func newApprovalToken() (string, error) {
+	raw := make([]byte, 32)
+	if _, err := io.ReadFull(rand.Reader, raw); err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(raw), nil
+}
+
+func hashApprovalToken(token string) string {
+	sum := sha256.Sum256([]byte(token))
+	return fmt.Sprintf("%x", sum[:])
+}
+
+func nonNilMap(value map[string]any) map[string]any {
+	if value == nil {
+		return map[string]any{}
+	}
+	return value
+}
+
+func stringValue(value *string) string {
+	if value == nil {
+		return ""
+	}
+	return *value
 }
 
 func decryptAPIKey(ciphertext string) (string, error) {

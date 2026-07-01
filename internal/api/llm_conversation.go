@@ -32,7 +32,9 @@ type agentConversationReply struct {
 	Domain          string
 	Entities        map[string]any
 	Capabilities    []string
+	UIBlocks        []map[string]any
 	ToolCalls       []map[string]any
+	ModelCalls      []map[string]any
 	ApprovalRequest map[string]any
 	ReasoningTrace  []db.ReasoningTraceStep
 }
@@ -42,6 +44,7 @@ func (server server) buildAgentConversationReply(
 	conversationID string,
 	riskAssessmentID string,
 	userMessage string,
+	pageContext json.RawMessage,
 ) (agentConversationReply, error) {
 	if reply, handled, err := server.githubDomainConversationReply(ctx, userMessage); handled || err != nil {
 		return reply, err
@@ -60,6 +63,7 @@ func (server server) buildAgentConversationReply(
 			projectID,
 			riskAssessmentID,
 			userMessage,
+			pageContext,
 			nil,
 		)
 		if err == nil {
@@ -77,6 +81,7 @@ func (server server) buildAgentConversationReply(
 				bundle.Assessment.ProjectID,
 				riskAssessmentID,
 				userMessage,
+				pageContext,
 				&bundle,
 			)
 		}
@@ -157,6 +162,7 @@ func requestAgentRuntimeSessionTurn(
 	projectID string,
 	riskAssessmentID string,
 	userMessage string,
+	pageContext json.RawMessage,
 	bundle *db.EvidenceBundle,
 ) (agentConversationReply, error) {
 	payload := map[string]any{
@@ -164,6 +170,13 @@ func requestAgentRuntimeSessionTurn(
 		"project_id":         projectID,
 		"risk_assessment_id": riskAssessmentID,
 		"message":            userMessage,
+	}
+	if len(pageContext) > 0 && string(pageContext) != "null" {
+		var decodedPageContext map[string]any
+		if err := json.Unmarshal(pageContext, &decodedPageContext); err != nil {
+			return agentConversationReply{}, fmt.Errorf("decode page context: %w", err)
+		}
+		payload["page_context"] = decodedPageContext
 	}
 	if bundle != nil {
 		payload["evidence_bundle"] = bundle
@@ -201,7 +214,9 @@ func requestAgentRuntimeSessionTurn(
 		Entities        map[string]any          `json:"entities"`
 		Capabilities    []string                `json:"capabilities"`
 		EvidenceRefs    []string                `json:"evidence_refs"`
+		UIBlocks        []map[string]any        `json:"ui_blocks"`
 		ToolCalls       []map[string]any        `json:"tool_calls"`
+		ModelCalls      []map[string]any        `json:"model_calls"`
 		ApprovalRequest map[string]any          `json:"approval_request"`
 		ReasoningTrace  []db.ReasoningTraceStep `json:"reasoning_trace"`
 	}
@@ -219,7 +234,9 @@ func requestAgentRuntimeSessionTurn(
 		Domain:          strings.TrimSpace(body.Domain),
 		Entities:        body.Entities,
 		Capabilities:    body.Capabilities,
+		UIBlocks:        sanitizeUIBlocks(body.UIBlocks),
 		ToolCalls:       body.ToolCalls,
+		ModelCalls:      body.ModelCalls,
 		ApprovalRequest: body.ApprovalRequest,
 		ReasoningTrace:  body.ReasoningTrace,
 	}, nil
@@ -287,6 +304,38 @@ func requestLLMConversationReply(
 	}
 
 	return strings.TrimSpace(body.Choices[0].Message.Content), nil
+}
+
+func sanitizeUIBlocks(blocks []map[string]any) []map[string]any {
+	if len(blocks) == 0 {
+		return []map[string]any{}
+	}
+	supportedTypes := map[string]bool{
+		"text":          true,
+		"repo_card":     true,
+		"pr_table":      true,
+		"check_summary": true,
+		"log_excerpt":   true,
+		"approval_card": true,
+		"config_diff":   true,
+	}
+	sanitized := make([]map[string]any, 0, len(blocks))
+	for _, block := range blocks {
+		blockType, ok := block["type"].(string)
+		if !ok || !supportedTypes[blockType] {
+			continue
+		}
+		sanitizedBlock := map[string]any{
+			"type": blockType,
+		}
+		if props, ok := block["props"].(map[string]any); ok {
+			sanitizedBlock["props"] = props
+		} else {
+			sanitizedBlock["props"] = map[string]any{}
+		}
+		sanitized = append(sanitized, sanitizedBlock)
+	}
+	return sanitized
 }
 
 func conversationPrompt(bundle db.EvidenceBundle, userMessage string) string {

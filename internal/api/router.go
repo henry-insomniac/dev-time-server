@@ -130,6 +130,9 @@ func NewRouter(dependencies ...Dependencies) http.Handler {
 		server.handleInternalGitHubRepositoryCheckLogs,
 	)
 	router.Post("/internal/action-suggestions", server.handleInternalCreateActionSuggestion)
+	router.Post("/api/approval-requests", server.handleCreateApprovalRequest)
+	router.Post("/api/approval-requests/{approvalID}/confirm", server.handleConfirmApprovalRequest)
+	router.Post("/api/approval-requests/{approvalID}/reject", server.handleRejectApprovalRequest)
 	router.Get("/api/projects/{projectID}/agent-conversation", server.handleAgentConversation)
 	router.Post("/api/agent-conversations/{conversationID}/turns", server.handleAgentConversationTurn)
 	router.Post("/api/agent-conversations/{conversationID}/turns/stream", server.handleAgentConversationTurnStream)
@@ -802,8 +805,9 @@ func (server server) handleAgentConversationTurnStream(response http.ResponseWri
 }
 
 type agentConversationTurnInput struct {
-	Message          string `json:"message"`
-	RiskAssessmentID string `json:"risk_assessment_id"`
+	Message          string          `json:"message"`
+	RiskAssessmentID string          `json:"risk_assessment_id"`
+	PageContext      json.RawMessage `json:"page_context"`
 }
 
 var errBadAgentConversationTurnRequest = errors.New("bad agent conversation turn request")
@@ -820,12 +824,17 @@ func (server server) createAgentConversationTurn(
 	if conversationID == "" || input.Message == "" || input.RiskAssessmentID == "" {
 		return db.AgentConversationTurn{}, errBadAgentConversationTurnRequest
 	}
+	pageContext, err := decodeAgentPageContext(input.PageContext)
+	if err != nil {
+		return db.AgentConversationTurn{}, errBadAgentConversationTurnRequest
+	}
 
 	agentReply, err := server.buildAgentConversationReply(
 		request.Context(),
 		conversationID,
 		input.RiskAssessmentID,
 		input.Message,
+		input.PageContext,
 	)
 	if err != nil {
 		return db.AgentConversationTurn{}, errAgentConversationReplyFailed
@@ -841,7 +850,10 @@ func (server server) createAgentConversationTurn(
 		agentReply.Domain,
 		agentReply.Entities,
 		agentReply.Capabilities,
+		pageContext,
+		agentReply.UIBlocks,
 		agentReply.ToolCalls,
+		agentReply.ModelCalls,
 		agentReply.ApprovalRequest,
 		agentReply.ReasoningTrace,
 	)
@@ -849,6 +861,17 @@ func (server server) createAgentConversationTurn(
 		return db.AgentConversationTurn{}, err
 	}
 	return turn, nil
+}
+
+func decodeAgentPageContext(rawPageContext json.RawMessage) (map[string]any, error) {
+	if len(rawPageContext) == 0 || string(rawPageContext) == "null" {
+		return nil, nil
+	}
+	var pageContext map[string]any
+	if err := json.Unmarshal(rawPageContext, &pageContext); err != nil {
+		return nil, err
+	}
+	return pageContext, nil
 }
 
 func (server server) writeAgentConversationTurnError(response http.ResponseWriter, err error) {
@@ -906,6 +929,141 @@ func (server server) handleConfirmActionSuggestion(response http.ResponseWriter,
 	}
 
 	writeJSON(response, http.StatusOK, suggestion)
+}
+
+func (server server) handleCreateApprovalRequest(response http.ResponseWriter, request *http.Request) {
+	if server.store == nil {
+		writeJSON(response, http.StatusServiceUnavailable, map[string]string{
+			"error": "repository store is not configured",
+		})
+		return
+	}
+
+	var input struct {
+		ProjectID     string         `json:"project_id"`
+		ActionType    string         `json:"action_type"`
+		TargetRef     string         `json:"target_ref"`
+		DraftBody     string         `json:"draft_body"`
+		RiskLevel     string         `json:"risk_level"`
+		EvidenceRefs  []string       `json:"evidence_refs"`
+		BeforePayload map[string]any `json:"before_payload"`
+		AfterPayload  map[string]any `json:"after_payload"`
+	}
+	if err := json.NewDecoder(request.Body).Decode(&input); err != nil {
+		writeJSON(response, http.StatusBadRequest, map[string]string{
+			"error": "invalid JSON request body",
+		})
+		return
+	}
+	if input.ProjectID == "" || input.ActionType == "" ||
+		input.TargetRef == "" || input.DraftBody == "" {
+		writeJSON(response, http.StatusBadRequest, map[string]string{
+			"error": "project_id, action_type, target_ref, and draft_body are required",
+		})
+		return
+	}
+
+	approval, err := server.store.CreateApprovalRequest(
+		request.Context(),
+		db.ApprovalRequestInput{
+			ProjectID:     input.ProjectID,
+			ActionType:    input.ActionType,
+			TargetRef:     input.TargetRef,
+			DraftBody:     input.DraftBody,
+			RiskLevel:     input.RiskLevel,
+			EvidenceRefs:  input.EvidenceRefs,
+			BeforePayload: input.BeforePayload,
+			AfterPayload:  input.AfterPayload,
+		},
+	)
+	if err != nil {
+		writeJSON(response, http.StatusInternalServerError, map[string]string{
+			"error": "create approval request failed",
+		})
+		return
+	}
+
+	writeJSON(response, http.StatusCreated, approval)
+}
+
+func (server server) handleConfirmApprovalRequest(response http.ResponseWriter, request *http.Request) {
+	if server.store == nil {
+		writeJSON(response, http.StatusServiceUnavailable, map[string]string{
+			"error": "repository store is not configured",
+		})
+		return
+	}
+
+	approvalID := chi.URLParam(request, "approvalID")
+	var input struct {
+		ApprovalToken string `json:"approval_token"`
+	}
+	if err := json.NewDecoder(request.Body).Decode(&input); err != nil {
+		writeJSON(response, http.StatusBadRequest, map[string]string{
+			"error": "invalid JSON request body",
+		})
+		return
+	}
+	approval, err := server.store.ConfirmApprovalRequest(
+		request.Context(),
+		approvalID,
+		input.ApprovalToken,
+	)
+	if err != nil {
+		writeApprovalError(response, err, "confirm approval request failed")
+		return
+	}
+
+	writeJSON(response, http.StatusOK, approval)
+}
+
+func (server server) handleRejectApprovalRequest(response http.ResponseWriter, request *http.Request) {
+	if server.store == nil {
+		writeJSON(response, http.StatusServiceUnavailable, map[string]string{
+			"error": "repository store is not configured",
+		})
+		return
+	}
+
+	approvalID := chi.URLParam(request, "approvalID")
+	var input struct {
+		Reason string `json:"reason"`
+	}
+	if err := json.NewDecoder(request.Body).Decode(&input); err != nil {
+		writeJSON(response, http.StatusBadRequest, map[string]string{
+			"error": "invalid JSON request body",
+		})
+		return
+	}
+	approval, err := server.store.RejectApprovalRequest(
+		request.Context(),
+		approvalID,
+		input.Reason,
+	)
+	if err != nil {
+		writeApprovalError(response, err, "reject approval request failed")
+		return
+	}
+
+	writeJSON(response, http.StatusOK, approval)
+}
+
+func writeApprovalError(response http.ResponseWriter, err error, fallback string) {
+	if errors.Is(err, db.ErrNotFound) {
+		writeJSON(response, http.StatusNotFound, map[string]string{
+			"error": "approval request not found",
+		})
+		return
+	}
+	if errors.Is(err, db.ErrConflict) {
+		writeJSON(response, http.StatusConflict, map[string]string{
+			"error": fallback,
+		})
+		return
+	}
+	writeJSON(response, http.StatusInternalServerError, map[string]string{
+		"error": fallback,
+	})
 }
 
 func (server server) handleProjectActionSuggestions(response http.ResponseWriter, request *http.Request) {
